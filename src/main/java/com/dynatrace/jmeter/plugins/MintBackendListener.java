@@ -279,7 +279,43 @@ public class MintBackendListener extends AbstractBackendListenerClient implement
 	}
 
 	private void addMetricsForTransaction(String transaction, SamplerMetric metric) {
-		// Emit original metrics (without response code split) for backwards compatibility
+	// NEW: Emit metrics split by response code and error description (Batch 3)
+	// This is now the primary emission method
+	TransactionResponseCodeMetrics rcMetrics = transactionResponseCodeMetrics.get(transaction);
+	if (rcMetrics != null && !rcMetrics.getAllMetrics().isEmpty()) {
+		for (ResponseCodeMetricsHolder rcHolder : rcMetrics.getAllMetrics()) {
+			String responseCode = rcHolder.getResponseCode();
+			String errorDescription = rcHolder.getErrorDescription();
+			
+			// Emit all metrics for this specific response code/error combination
+			addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.count", 
+					rcHolder.getRequestCount(), responseCode, errorDescription);
+			addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.error", 
+					rcHolder.getErrorCount(), responseCode, errorDescription);
+			addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.hits", 
+					rcHolder.getRequestCount(), responseCode, errorDescription);
+			
+			// Emit percentiles for this response code
+			if (!rcHolder.getResponseTimes().isEmpty()) {
+				List<Long> responseTimes = rcHolder.getResponseTimes();
+				addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.p50time", 
+						PercentileCalculator.calculateP50(responseTimes), responseCode, errorDescription);
+				addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.p90time", 
+						PercentileCalculator.calculateP90(responseTimes), responseCode, errorDescription);
+				addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.p95time", 
+						PercentileCalculator.calculateP95(responseTimes), responseCode, errorDescription);
+				addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.p99time", 
+						PercentileCalculator.calculateP99(responseTimes), responseCode, errorDescription);
+				
+				// Emit throughput for this response code
+				double throughput = PercentileCalculator.calculateThroughput(rcHolder.getRequestCount(), SEND_INTERVAL);
+				addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.throughput", 
+						throughput, responseCode, errorDescription);
+			}
+		}
+	} else {
+		// Fallback: Emit aggregate metrics without response code (for backwards compatibility)
+		// This is used if no response code metrics were collected
 		addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.count", metric.getTotal(), "", "");
 		addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.success", metric.getSuccesses(), "", "");
 		addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.error", metric.getFailures(), "", "");
@@ -309,42 +345,8 @@ public class MintBackendListener extends AbstractBackendListenerClient implement
 			double throughput = PercentileCalculator.calculateThroughput(holder.getRequestCount(), SEND_INTERVAL);
 			addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.throughput", throughput, "", "");
 		}
-		
-		// NEW: Emit metrics split by response code and error description (Batch 3)
-		TransactionResponseCodeMetrics rcMetrics = transactionResponseCodeMetrics.get(transaction);
-		if (rcMetrics != null) {
-			for (ResponseCodeMetricsHolder rcHolder : rcMetrics.getAllMetrics()) {
-				String responseCode = rcHolder.getResponseCode();
-				String errorDescription = rcHolder.getErrorDescription();
-				
-				// Emit metrics for this specific response code/error combination
-				addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.count", 
-						rcHolder.getRequestCount(), responseCode, errorDescription);
-				addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.error", 
-						rcHolder.getErrorCount(), responseCode, errorDescription);
-				addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.hits", 
-						rcHolder.getRequestCount(), responseCode, errorDescription);
-				
-				// Emit percentiles for this response code
-				if (!rcHolder.getResponseTimes().isEmpty()) {
-					List<Long> responseTimes = rcHolder.getResponseTimes();
-					addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.p50time", 
-							PercentileCalculator.calculateP50(responseTimes), responseCode, errorDescription);
-					addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.p90time", 
-							PercentileCalculator.calculateP90(responseTimes), responseCode, errorDescription);
-					addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.p95time", 
-							PercentileCalculator.calculateP95(responseTimes), responseCode, errorDescription);
-					addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.p99time", 
-							PercentileCalculator.calculateP99(responseTimes), responseCode, errorDescription);
-					
-					// Emit throughput for this response code
-					double throughput = PercentileCalculator.calculateThroughput(rcHolder.getRequestCount(), SEND_INTERVAL);
-					addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.throughput", 
-							throughput, responseCode, errorDescription);
-				}
-			}
-		}
 	}
+}
 
 	private void addMetricLineForTransaction(String transaction, String metricKey, double metricValue, 
 			String responseCode, String errorDescription) {
