@@ -207,8 +207,13 @@ public class MintBackendListener extends AbstractBackendListenerClient implement
 		log.debug("{}: run finished", listenerName);
 	}
 
+	// ... (keep everything the same up to the sendMetrics() method)
+
 	private void sendMetrics() {
 		final Iterator<Entry<String, SamplerMetric>> iterator = getMetricsPerSampler().entrySet().iterator();
+		
+		// NEW: Track total hits for test-level throughput
+		long totalHits = 0;
 
 		while (true) {
 			if (!iterator.hasNext()) {
@@ -226,6 +231,8 @@ public class MintBackendListener extends AbstractBackendListenerClient implement
 				if (matcher.find()) {
 					log.debug("Adding SampleLabel '{}' to samplerMetric-List", transaction);
 					addMetricsForTransaction(transaction, metric);
+					// NEW: Accumulate total hits
+					totalHits += metric.getHits();
 				} else {
 					log.debug("SampleLabel '{}' does not match Regex '{}'", transaction, sendSamplersByRegex);
 				}
@@ -240,9 +247,9 @@ public class MintBackendListener extends AbstractBackendListenerClient implement
 		addMetricLineForTest("jmeter.usermetrics.startedthreads", userMetrics.getStartedThreads());
 		addMetricLineForTest("jmeter.usermetrics.finishedthreads", userMetrics.getFinishedThreads());
 		
-		// NEW: Emit test-level throughput
+		// NEW: Emit test-level throughput (use accumulated total hits)
 		addMetricLineForTest("jmeter.usermetrics.throughput", 
-				(int) PercentileCalculator.calculateThroughput(userMetrics.getHits(), SEND_INTERVAL));
+				(int) PercentileCalculator.calculateThroughput(totalHits, SEND_INTERVAL));
 
 		mintMetricSender.writeAndSendMetrics();
 		
