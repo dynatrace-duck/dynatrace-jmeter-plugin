@@ -57,8 +57,11 @@ public class MintBackendListener extends AbstractBackendListenerClient implement
 	private String sendSamplersByRegex;
 	private Pattern samplersToFilter;
 	
-	// NEW: Map to hold transaction metrics holders for percentile calculations
+	// Metrics holders for percentiles and throughput (Batch 1)
 	private Map<String, TransactionMetricsHolder> transactionMetricsHolders = new HashMap<>();
+	
+	// NEW: Response code metrics for Batch 3
+	private Map<String, TransactionResponseCodeMetrics> transactionResponseCodeMetrics = new HashMap<>();
 
 	static {
 		DEFAULT_ARGS.put("dynatraceMetricIngestUrl", "https://DT_SERVER/api/v2/metrics/ingest");
@@ -173,12 +176,25 @@ public class MintBackendListener extends AbstractBackendListenerClient implement
 			final SamplerMetric cumulatedMetrics = this.getSamplerMetric(sampleResult.getSampleLabel());
 			cumulatedMetrics.add(sampleResult);
 			
-			// NEW: Collect response times for percentile calculations
+			// Collect response times for percentile calculations (Batch 1)
 			String transactionName = sampleResult.getSampleLabel();
 			TransactionMetricsHolder holder = transactionMetricsHolders.computeIfAbsent(transactionName,
 					k -> new TransactionMetricsHolder());
 			holder.addResponseTime(sampleResult.getTime());
 			holder.incrementRequestCount();
+			
+			// NEW: Collect metrics by response code and error description (Batch 3)
+			String responseCode = sampleResult.getResponseCode();
+			String errorDescription = sampleResult.isSuccessful() ? "" : sampleResult.getResponseMessage();
+			
+			TransactionResponseCodeMetrics rcMetrics = transactionResponseCodeMetrics.computeIfAbsent(transactionName,
+					k -> new TransactionResponseCodeMetrics());
+			ResponseCodeMetricsHolder rcHolder = rcMetrics.getOrCreate(responseCode, errorDescription);
+			rcHolder.addResponseTime(sampleResult.getTime());
+			rcHolder.incrementRequestCount();
+			if (!sampleResult.isSuccessful()) {
+				rcHolder.incrementErrorCount();
+			}
 		}
 
 		log.debug("{}: handleSampleResults: UserMetrics(startedThreads={}, finishedThreads={})",
@@ -207,12 +223,10 @@ public class MintBackendListener extends AbstractBackendListenerClient implement
 		log.debug("{}: run finished", listenerName);
 	}
 
-	// ... (keep everything the same up to the sendMetrics() method)
-
 	private void sendMetrics() {
 		final Iterator<Entry<String, SamplerMetric>> iterator = getMetricsPerSampler().entrySet().iterator();
 		
-		// NEW: Track total hits for test-level throughput
+		// Track total hits for test-level throughput (Batch 1)
 		long totalHits = 0;
 
 		while (true) {
@@ -231,7 +245,6 @@ public class MintBackendListener extends AbstractBackendListenerClient implement
 				if (matcher.find()) {
 					log.debug("Adding SampleLabel '{}' to samplerMetric-List", transaction);
 					addMetricsForTransaction(transaction, metric);
-					// NEW: Accumulate total hits
 					totalHits += metric.getHits();
 				} else {
 					log.debug("SampleLabel '{}' does not match Regex '{}'", transaction, sendSamplersByRegex);
@@ -247,14 +260,15 @@ public class MintBackendListener extends AbstractBackendListenerClient implement
 		addMetricLineForTest("jmeter.usermetrics.startedthreads", userMetrics.getStartedThreads());
 		addMetricLineForTest("jmeter.usermetrics.finishedthreads", userMetrics.getFinishedThreads());
 		
-		// NEW: Emit test-level throughput (use accumulated total hits)
+		// Emit test-level throughput (Batch 1)
 		addMetricLineForTest("jmeter.usermetrics.throughput", 
 				(int) PercentileCalculator.calculateThroughput(totalHits, SEND_INTERVAL));
 
 		mintMetricSender.writeAndSendMetrics();
 		
-		// NEW: Reset transaction metrics holders for next interval
+		// Reset holders for next interval
 		transactionMetricsHolders.clear();
+		transactionResponseCodeMetrics.clear();
 	}
 
 	private void addMetricLineForTest(String metricKey, int metricValue) {
@@ -265,46 +279,96 @@ public class MintBackendListener extends AbstractBackendListenerClient implement
 	}
 
 	private void addMetricsForTransaction(String transaction, SamplerMetric metric) {
-		addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.count", metric.getTotal());
-		addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.success", metric.getSuccesses());
-		addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.error", metric.getFailures());
-		addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.hits", metric.getHits());
-		addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.mintime", metric.getAllMinTime());
-		addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.maxtime", metric.getAllMaxTime());
-		addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.meantime", metric.getAllMean());
-		addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.sentbytes", metric.getSentBytes());
-		addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.receivedbytes", metric.getReceivedBytes());
+		// Emit original metrics (without response code split) for backwards compatibility
+		addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.count", metric.getTotal(), "", "");
+		addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.success", metric.getSuccesses(), "", "");
+		addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.error", metric.getFailures(), "", "");
+		addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.hits", metric.getHits(), "", "");
+		addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.mintime", metric.getAllMinTime(), "", "");
+		addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.maxtime", metric.getAllMaxTime(), "", "");
+		addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.meantime", metric.getAllMean(), "", "");
+		addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.sentbytes", metric.getSentBytes(), "", "");
+		addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.receivedbytes", metric.getReceivedBytes(), "", "");
 		
-		// NEW: Emit percentile and throughput metrics
+		// Emit percentile and throughput metrics (Batch 1)
 		TransactionMetricsHolder holder = transactionMetricsHolders.get(transaction);
 		if (holder != null && !holder.getResponseTimes().isEmpty()) {
 			List<Long> responseTimes = holder.getResponseTimes();
 			
 			// Calculate and emit percentiles
 			addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.p50time", 
-					PercentileCalculator.calculateP50(responseTimes));
+					PercentileCalculator.calculateP50(responseTimes), "", "");
 			addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.p90time", 
-					PercentileCalculator.calculateP90(responseTimes));
+					PercentileCalculator.calculateP90(responseTimes), "", "");
 			addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.p95time", 
-					PercentileCalculator.calculateP95(responseTimes));
+					PercentileCalculator.calculateP95(responseTimes), "", "");
 			addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.p99time", 
-					PercentileCalculator.calculateP99(responseTimes));
+					PercentileCalculator.calculateP99(responseTimes), "", "");
 			
 			// Calculate and emit throughput
 			double throughput = PercentileCalculator.calculateThroughput(holder.getRequestCount(), SEND_INTERVAL);
-			addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.throughput", throughput);
+			addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.throughput", throughput, "", "");
+		}
+		
+		// NEW: Emit metrics split by response code and error description (Batch 3)
+		TransactionResponseCodeMetrics rcMetrics = transactionResponseCodeMetrics.get(transaction);
+		if (rcMetrics != null) {
+			for (ResponseCodeMetricsHolder rcHolder : rcMetrics.getAllMetrics()) {
+				String responseCode = rcHolder.getResponseCode();
+				String errorDescription = rcHolder.getErrorDescription();
+				
+				// Emit metrics for this specific response code/error combination
+				addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.count", 
+						rcHolder.getRequestCount(), responseCode, errorDescription);
+				addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.error", 
+						rcHolder.getErrorCount(), responseCode, errorDescription);
+				addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.hits", 
+						rcHolder.getRequestCount(), responseCode, errorDescription);
+				
+				// Emit percentiles for this response code
+				if (!rcHolder.getResponseTimes().isEmpty()) {
+					List<Long> responseTimes = rcHolder.getResponseTimes();
+					addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.p50time", 
+							PercentileCalculator.calculateP50(responseTimes), responseCode, errorDescription);
+					addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.p90time", 
+							PercentileCalculator.calculateP90(responseTimes), responseCode, errorDescription);
+					addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.p95time", 
+							PercentileCalculator.calculateP95(responseTimes), responseCode, errorDescription);
+					addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.p99time", 
+							PercentileCalculator.calculateP99(responseTimes), responseCode, errorDescription);
+					
+					// Emit throughput for this response code
+					double throughput = PercentileCalculator.calculateThroughput(rcHolder.getRequestCount(), SEND_INTERVAL);
+					addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.throughput", 
+							throughput, responseCode, errorDescription);
+				}
+			}
 		}
 	}
 
-	private void addMetricLineForTransaction(String transaction, String metricKey, double metricValue) {
+	private void addMetricLineForTransaction(String transaction, String metricKey, double metricValue, 
+			String responseCode, String errorDescription) {
 		MintMetricsLine line = new MintMetricsLine(metricKey);
-		addTransactionDimensions(transaction, line);
+		addTransactionDimensions(transaction, line, responseCode, errorDescription);
 		line.addGauge(new MintGauge(metricValue));
 		mintMetricSender.addMetric(line);
 	}
 
-	private void addTransactionDimensions(String transaction, MintMetricsLine metricsLine) {
+	private void addTransactionDimensions(String transaction, MintMetricsLine metricsLine, 
+			String responseCode, String errorDescription) {
 		metricsLine.addDimension(new MintDimension("transaction", SchemalessMetricSanitizer.sanitizeDimensionValue(transaction)));
+		
+		// Add response code dimension if not empty
+		if (responseCode != null && !responseCode.isEmpty()) {
+			metricsLine.addDimension(new MintDimension("responseCode", SchemalessMetricSanitizer.sanitizeDimensionValue(responseCode)));
+		}
+		
+		// Add error description dimension if not empty
+		if (errorDescription != null && !errorDescription.isEmpty()) {
+			metricsLine.addDimension(new MintDimension("errorDescription", SchemalessMetricSanitizer.sanitizeDimensionValue(errorDescription)));
+		}
+		
+		// Add user-configured transaction dimensions
 		transactionDimensions.forEach((key, value) -> {
 			if (!key.trim().isEmpty() && !value.trim().isEmpty())
 				metricsLine.addDimension(
