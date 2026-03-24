@@ -161,52 +161,54 @@ public class MintBackendListener extends AbstractBackendListenerClient implement
 	}
 
 	@Override
-	public void handleSampleResults(List<SampleResult> sampleResults,
-			BackendListenerContext backendListenerContext) {
-		log.debug("{}: handleSampleResults for {} samples", listenerName, sampleResults.size());
+  public void handleSampleResults(List<SampleResult> sampleResults,
+      BackendListenerContext backendListenerContext) {
+    log.debug("{}: handleSampleResults for {} samples", listenerName, sampleResults.size());
 
-		UserMetric userMetrics = getUserMetrics();
+    UserMetric userMetrics = getUserMetrics();
 
-		for (SampleResult sampleResult : sampleResults) {
-			userMetrics.add(sampleResult);
+    for (SampleResult sampleResult : sampleResults) {
+      userMetrics.add(sampleResult);
 
-			SamplerMetric samplerMetric = this.getSamplerMetric(sampleResult.getSampleLabel());
-			samplerMetric.add(sampleResult);
+      SamplerMetric samplerMetric = this.getSamplerMetric(sampleResult.getSampleLabel());
+      samplerMetric.add(sampleResult);
 
-			final SamplerMetric cumulatedMetrics = this.getSamplerMetric(sampleResult.getSampleLabel());
-			cumulatedMetrics.add(sampleResult);
-			
-			// Collect response times for percentile calculations (Batch 1)
-			String transactionName = sampleResult.getSampleLabel();
-			TransactionMetricsHolder holder = transactionMetricsHolders.computeIfAbsent(transactionName,
-					k -> new TransactionMetricsHolder());
-			holder.addResponseTime(sampleResult.getTime());
-			holder.incrementRequestCount();
-			
-			// NEW: Collect metrics by response code and error description (Batch 3)
-			String responseCode = sampleResult.getResponseCode();
-			String errorDescription = sampleResult.isSuccessful() ? "" : sampleResult.getResponseMessage();
-			
-			TransactionResponseCodeMetrics rcMetrics = transactionResponseCodeMetrics.computeIfAbsent(transactionName,
-					k -> new TransactionResponseCodeMetrics());
-			ResponseCodeMetricsHolder rcHolder = rcMetrics.getOrCreate(responseCode, errorDescription);
-			rcHolder.addResponseTime(sampleResult.getTime());
-			rcHolder.incrementRequestCount();
-			if (!sampleResult.isSuccessful()) {
-				rcHolder.incrementErrorCount();
-			}
-		}
+      final SamplerMetric cumulatedMetrics = this.getSamplerMetric(sampleResult.getSampleLabel());
+      cumulatedMetrics.add(sampleResult);
+      
+      // Collect response times for percentile calculations (Batch 1)
+      String transactionName = sampleResult.getSampleLabel();
+      TransactionMetricsHolder holder = transactionMetricsHolders.computeIfAbsent(transactionName,
+          k -> new TransactionMetricsHolder());
+      holder.addResponseTime(sampleResult.getTime());
+      holder.incrementRequestCount();
+      
+      // NEW: Collect metrics by response code and error description (Batch 3)
+      String responseCode = sampleResult.getResponseCode();
+      String errorDescription = sampleResult.isSuccessful() ? "" : sampleResult.getResponseMessage();
+      
+      TransactionResponseCodeMetrics rcMetrics = transactionResponseCodeMetrics.computeIfAbsent(transactionName,
+          k -> new TransactionResponseCodeMetrics());
+      ResponseCodeMetricsHolder rcHolder = rcMetrics.getOrCreate(responseCode, errorDescription);
+      rcHolder.addResponseTime(sampleResult.getTime());
+      rcHolder.incrementRequestCount();
+      rcHolder.addSentBytes(sampleResult.getSentBytes());
+      rcHolder.addReceivedBytes(sampleResult.getResponseData().length);
+      if (!sampleResult.isSuccessful()) {
+        rcHolder.incrementErrorCount();
+      }
+    }
 
-		log.debug("{}: handleSampleResults: UserMetrics(startedThreads={}, finishedThreads={})",
-				listenerName,
-				getUserMetrics().getStartedThreads(),
-				getUserMetrics().getFinishedThreads());
-		final SamplerMetric allCumulatedMetrics = this.getSamplerMetric("all");
-		log.debug("{}: handleSampleResults: cumulatedMetrics(hits={}, errors={}, success={}, total={})",
-				listenerName,
-				allCumulatedMetrics.getHits(), allCumulatedMetrics.getErrors(), allCumulatedMetrics.getSuccesses(),
-				allCumulatedMetrics.getTotal());
-	}
+    log.debug("{}: handleSampleResults: UserMetrics(startedThreads={}, finishedThreads={})",
+        listenerName,
+        getUserMetrics().getStartedThreads(),
+        getUserMetrics().getFinishedThreads());
+    final SamplerMetric allCumulatedMetrics = this.getSamplerMetric("all");
+    log.debug("{}: handleSampleResults: cumulatedMetrics(hits={}, errors={}, success={}, total={})",
+        listenerName,
+        allCumulatedMetrics.getHits(), allCumulatedMetrics.getErrors(), allCumulatedMetrics.getSuccesses(),
+        allCumulatedMetrics.getTotal());
+  }
 
 	@Override
 	public void run() {
@@ -307,6 +309,10 @@ public class MintBackendListener extends AbstractBackendListenerClient implement
 					maxTime, responseCode, errorDescription);
 			addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.meantime", 
 					meanTime, responseCode, errorDescription);
+			addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.sentbytes", 
+					rcHolder.getSentBytes(), responseCode, errorDescription);
+			addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.receivedbytes", 
+					rcHolder.getReceivedBytes(), responseCode, errorDescription);
 			
 			// Emit percentiles for this response code
 			if (!responseTimes.isEmpty()) {

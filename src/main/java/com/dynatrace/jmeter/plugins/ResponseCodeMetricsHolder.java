@@ -31,6 +31,8 @@ public class ResponseCodeMetricsHolder {
     private List<Long> responseTimes = new CopyOnWriteArrayList<>();
     private long requestCount = 0;
     private long errorCount = 0;
+    private long sentBytes = 0;
+    private long receivedBytes = 0;
 
     public ResponseCodeMetricsHolder(String responseCode, String errorDescription) {
         this.responseCode = responseCode != null ? responseCode : "unknown";
@@ -56,6 +58,20 @@ public class ResponseCodeMetricsHolder {
      */
     public void incrementErrorCount() {
         errorCount++;
+    }
+
+    /**
+     * Add sent bytes.
+     */
+    public void addSentBytes(long bytes) {
+        sentBytes += bytes;
+    }
+
+    /**
+     * Add received bytes.
+     */
+    public void addReceivedBytes(long bytes) {
+        receivedBytes += bytes;
     }
 
     /**
@@ -93,6 +109,20 @@ public class ResponseCodeMetricsHolder {
         return errorDescription;
     }
 
+    /**
+     * Get total sent bytes.
+     */
+    public long getSentBytes() {
+        return sentBytes;
+    }
+
+    /**
+     * Get total received bytes.
+     */
+    public long getReceivedBytes() {
+        return receivedBytes;
+    }
+
     @Override
     public boolean equals(Object o) {
         if (this == o) return true;
@@ -114,6 +144,8 @@ public class ResponseCodeMetricsHolder {
                 ", errorDescription='" + errorDescription + '\'' +
                 ", requestCount=" + requestCount +
                 ", errorCount=" + errorCount +
+                ", sentBytes=" + sentBytes +
+                ", receivedBytes=" + receivedBytes +
                 '}';
     }
 }
