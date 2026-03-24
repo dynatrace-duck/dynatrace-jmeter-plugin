@@ -56,6 +56,9 @@ public class MintBackendListener extends AbstractBackendListenerClient implement
 	private String listenerName;
 	private String sendSamplersByRegex;
 	private Pattern samplersToFilter;
+	
+	// NEW: Map to hold transaction metrics holders for percentile calculations
+	private Map<String, TransactionMetricsHolder> transactionMetricsHolders = new HashMap<>();
 
 	static {
 		DEFAULT_ARGS.put("dynatraceMetricIngestUrl", "https://DT_SERVER/api/v2/metrics/ingest");
@@ -169,6 +172,13 @@ public class MintBackendListener extends AbstractBackendListenerClient implement
 
 			final SamplerMetric cumulatedMetrics = this.getSamplerMetric(sampleResult.getSampleLabel());
 			cumulatedMetrics.add(sampleResult);
+			
+			// NEW: Collect response times for percentile calculations
+			String transactionName = sampleResult.getSampleLabel();
+			TransactionMetricsHolder holder = transactionMetricsHolders.computeIfAbsent(transactionName,
+					k -> new TransactionMetricsHolder());
+			holder.addResponseTime(sampleResult.getTime());
+			holder.incrementRequestCount();
 		}
 
 		log.debug("{}: handleSampleResults: UserMetrics(startedThreads={}, finishedThreads={})",
@@ -229,8 +239,15 @@ public class MintBackendListener extends AbstractBackendListenerClient implement
 		addMetricLineForTest("jmeter.usermetrics.meanactivethreads", userMetrics.getMeanActiveThreads());
 		addMetricLineForTest("jmeter.usermetrics.startedthreads", userMetrics.getStartedThreads());
 		addMetricLineForTest("jmeter.usermetrics.finishedthreads", userMetrics.getFinishedThreads());
+		
+		// NEW: Emit test-level throughput
+		addMetricLineForTest("jmeter.usermetrics.throughput", 
+				(int) PercentileCalculator.calculateThroughput(userMetrics.getHits(), SEND_INTERVAL));
 
 		mintMetricSender.writeAndSendMetrics();
+		
+		// NEW: Reset transaction metrics holders for next interval
+		transactionMetricsHolders.clear();
 	}
 
 	private void addMetricLineForTest(String metricKey, int metricValue) {
@@ -250,6 +267,26 @@ public class MintBackendListener extends AbstractBackendListenerClient implement
 		addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.meantime", metric.getAllMean());
 		addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.sentbytes", metric.getSentBytes());
 		addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.receivedbytes", metric.getReceivedBytes());
+		
+		// NEW: Emit percentile and throughput metrics
+		TransactionMetricsHolder holder = transactionMetricsHolders.get(transaction);
+		if (holder != null && !holder.getResponseTimes().isEmpty()) {
+			List<Long> responseTimes = holder.getResponseTimes();
+			
+			// Calculate and emit percentiles
+			addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.p50time", 
+					PercentileCalculator.calculateP50(responseTimes));
+			addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.p90time", 
+					PercentileCalculator.calculateP90(responseTimes));
+			addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.p95time", 
+					PercentileCalculator.calculateP95(responseTimes));
+			addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.p99time", 
+					PercentileCalculator.calculateP99(responseTimes));
+			
+			// Calculate and emit throughput
+			double throughput = PercentileCalculator.calculateThroughput(holder.getRequestCount(), SEND_INTERVAL);
+			addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.throughput", throughput);
+		}
 	}
 
 	private void addMetricLineForTransaction(String transaction, String metricKey, double metricValue) {
