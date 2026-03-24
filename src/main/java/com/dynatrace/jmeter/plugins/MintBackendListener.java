@@ -354,28 +354,28 @@ public class MintBackendListener extends AbstractBackendListenerClient implement
 		mintMetricSender.addMetric(line);
 	}
 
-	private void addTransactionDimensions(String transaction, MintMetricsLine metricsLine, 
-			String responseCode, String errorDescription) {
-		metricsLine.addDimension(new MintDimension("transaction", SchemalessMetricSanitizer.sanitizeDimensionValue(transaction)));
-		
-		// Add response code dimension if not empty
-		if (responseCode != null && !responseCode.isEmpty()) {
-			metricsLine.addDimension(new MintDimension("responseCode", SchemalessMetricSanitizer.sanitizeDimensionValue(responseCode)));
-		}
-		
-		// Add error description dimension if not empty
-		if (errorDescription != null && !errorDescription.isEmpty()) {
-			metricsLine.addDimension(new MintDimension("errorDescription", SchemalessMetricSanitizer.sanitizeDimensionValue(errorDescription)));
-		}
-		
-		// Add user-configured transaction dimensions
-		transactionDimensions.forEach((key, value) -> {
-			if (!key.trim().isEmpty() && !value.trim().isEmpty())
-				metricsLine.addDimension(
-						new MintDimension(SchemalessMetricSanitizer.sanitizeDimensionIdentifier(key),
-								SchemalessMetricSanitizer.sanitizeDimensionValue(value)));
-		});
-	}
+  private void addTransactionDimensions(String transaction, MintMetricsLine metricsLine, 
+      String responseCode, String errorDescription) {
+    metricsLine.addDimension(new MintDimension("transaction", SchemalessMetricSanitizer.sanitizeDimensionValue(transaction)));
+    
+    // Add response code dimension if not empty (lowercase key as per Dynatrace requirements)
+    if (responseCode != null && !responseCode.isEmpty()) {
+      metricsLine.addDimension(new MintDimension("response_code", SchemalessMetricSanitizer.sanitizeDimensionValue(responseCode)));
+    }
+    
+    // Add error description dimension if not empty (lowercase key)
+    if (errorDescription != null && !errorDescription.isEmpty()) {
+      metricsLine.addDimension(new MintDimension("error_description", SchemalessMetricSanitizer.sanitizeDimensionValue(errorDescription)));
+    }
+    
+    // Add user-configured transaction dimensions
+    transactionDimensions.forEach((key, value) -> {
+      if (!key.trim().isEmpty() && !value.trim().isEmpty())
+        metricsLine.addDimension(
+            new MintDimension(SchemalessMetricSanitizer.sanitizeDimensionIdentifier(key),
+                SchemalessMetricSanitizer.sanitizeDimensionValue(value)));
+    });
+  }
 
 	private void addTestDimensions(MintMetricsLine metricsLine) {
 		testDimensions.forEach((key, value) -> {
