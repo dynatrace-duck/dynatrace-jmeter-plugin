@@ -164,80 +164,119 @@ public class MintBackendListener extends AbstractBackendListenerClient implement
 	}
 
 	@Override
-	public void handleSampleResults(List<SampleResult> sampleResults,
-			BackendListenerContext backendListenerContext) {
-		log.debug("{}: handleSampleResults for {} samples", listenerName, sampleResults.size());
+public void handleSampleResults(List<SampleResult> sampleResults,
+		BackendListenerContext backendListenerContext) {
+	log.debug("{}: handleSampleResults for {} samples", listenerName, sampleResults.size());
 
-		UserMetric userMetrics = getUserMetrics();
+	UserMetric userMetrics = getUserMetrics();
 
-		for (SampleResult sampleResult : sampleResults) {
-			userMetrics.add(sampleResult);
+	for (SampleResult sampleResult : sampleResults) {
+		log.info("{}: Processing sample: {} | Type: {} | SubResults: {}", 
+				listenerName, 
+				sampleResult.getSampleLabel(),
+				sampleResult.getClass().getSimpleName(),
+				sampleResult.getSubResults() != null ? sampleResult.getSubResults().length : "null");
+		
+		userMetrics.add(sampleResult);
 
-			SamplerMetric samplerMetric = this.getSamplerMetric(sampleResult.getSampleLabel());
-			samplerMetric.add(sampleResult);
+		SamplerMetric samplerMetric = this.getSamplerMetric(sampleResult.getSampleLabel());
+		samplerMetric.add(sampleResult);
 
-			final SamplerMetric cumulatedMetrics = this.getSamplerMetric(sampleResult.getSampleLabel());
-			cumulatedMetrics.add(sampleResult);
+		final SamplerMetric cumulatedMetrics = this.getSamplerMetric(sampleResult.getSampleLabel());
+		cumulatedMetrics.add(sampleResult);
+		
+		// Check if this is a Transaction Controller parent sample (has subsamples)
+		SampleResult[] subResults = sampleResult.getSubResults();
+		boolean isTransactionControllerParent = subResults != null && subResults.length > 0;
+		
+		log.info("{}: isTransactionControllerParent = {} for sample: {}", 
+				listenerName, isTransactionControllerParent, sampleResult.getSampleLabel());
+		
+		if (isTransactionControllerParent) {
+			log.info("{}: DETECTED TRANSACTION CONTROLLER: {} with {} subsamples", 
+					listenerName, sampleResult.getSampleLabel(), subResults.length);
 			
-			// NEW (Batch 2): Detect if this is a Transaction Controller sample
-			// Transaction Controllers have subsamples and their own sample result
-			boolean isTransactionController = sampleResult.getSubResults() != null && sampleResult.getSubResults().length > 0;
+			// Handle Transaction Group (Batch 2)
+			String groupName = sampleResult.getSampleLabel();
+			TransactionGroupMetricsHolder groupHolder = transactionGroupMetricsHolders.computeIfAbsent(groupName,
+					k -> new TransactionGroupMetricsHolder(groupName));
 			
-			if (isTransactionController) {
-				// Handle Transaction Group (Batch 2)
-				String groupName = sampleResult.getSampleLabel();
-				TransactionGroupMetricsHolder groupHolder = transactionGroupMetricsHolders.computeIfAbsent(groupName,
-						k -> new TransactionGroupMetricsHolder(groupName));
+			// Add the transaction group's elapsed time (the parent's total time)
+			groupHolder.addElapsedTime(sampleResult.getTime());
+			
+			// Process each child sample individually (Batch 3)
+			for (int i = 0; i < subResults.length; i++) {
+				SampleResult childSample = subResults[i];
+				log.info("{}: Processing child sample [{}/{}]: {} | Response Code: {} | Success: {}", 
+						listenerName, 
+						i + 1, 
+						subResults.length,
+						childSample.getSampleLabel(),
+						childSample.getResponseCode(),
+						childSample.isSuccessful());
 				
-				// Add the transaction group's elapsed time
-				groupHolder.addElapsedTime(sampleResult.getTime());
+				// Emit individual request metrics for each child
+				processIndividualRequest(childSample);
 				
-				// Aggregate stats from all subsamples
-				for (SampleResult subsample : sampleResult.getSubResults()) {
-					groupHolder.addCount(1);
-					if (!subsample.isSuccessful()) {
-						groupHolder.addErrors(1);
-					}
-					groupHolder.addSentBytes(subsample.getSentBytes());
-					groupHolder.addReceivedBytes(subsample.getResponseData().length);
+				// Aggregate stats from this child into the group
+				groupHolder.addCount(1);
+				if (!childSample.isSuccessful()) {
+					groupHolder.addErrors(1);
 				}
-			} else {
-				// Handle individual HTTP requests (existing logic for Batches 1 & 3)
-				
-				// Collect response times for percentile calculations (Batch 1)
-				String transactionName = sampleResult.getSampleLabel();
-				TransactionMetricsHolder holder = transactionMetricsHolders.computeIfAbsent(transactionName,
-						k -> new TransactionMetricsHolder());
-				holder.addResponseTime(sampleResult.getTime());
-				holder.incrementRequestCount();
-				
-				// Collect metrics by response code and error description (Batch 3)
-				String responseCode = sampleResult.getResponseCode();
-				String errorDescription = sampleResult.isSuccessful() ? "" : sampleResult.getResponseMessage();
-				
-				TransactionResponseCodeMetrics rcMetrics = transactionResponseCodeMetrics.computeIfAbsent(transactionName,
-						k -> new TransactionResponseCodeMetrics());
-				ResponseCodeMetricsHolder rcHolder = rcMetrics.getOrCreate(responseCode, errorDescription);
-				rcHolder.addResponseTime(sampleResult.getTime());
-				rcHolder.incrementRequestCount();
-				rcHolder.addSentBytes(sampleResult.getSentBytes());
-				rcHolder.addReceivedBytes(sampleResult.getResponseData().length);
-				if (!sampleResult.isSuccessful()) {
-					rcHolder.incrementErrorCount();
-				}
+				groupHolder.addSentBytes(childSample.getSentBytes());
+				groupHolder.addReceivedBytes(childSample.getResponseData().length);
 			}
+		} else {
+			// This is a standalone HTTP request (not in a Transaction Controller)
+			log.info("{}: Processing STANDALONE request: {}", listenerName, sampleResult.getSampleLabel());
+			processIndividualRequest(sampleResult);
 		}
-
-		log.debug("{}: handleSampleResults: UserMetrics(startedThreads={}, finishedThreads={})",
-				listenerName,
-				getUserMetrics().getStartedThreads(),
-				getUserMetrics().getFinishedThreads());
-		final SamplerMetric allCumulatedMetrics = this.getSamplerMetric("all");
-		log.debug("{}: handleSampleResults: cumulatedMetrics(hits={}, errors={}, success={}, total={})",
-				listenerName,
-				allCumulatedMetrics.getHits(), allCumulatedMetrics.getErrors(), allCumulatedMetrics.getSuccesses(),
-				allCumulatedMetrics.getTotal());
 	}
+
+	log.debug("{}: handleSampleResults: UserMetrics(startedThreads={}, finishedThreads={})",
+			listenerName,
+			getUserMetrics().getStartedThreads(),
+			getUserMetrics().getFinishedThreads());
+	final SamplerMetric allCumulatedMetrics = this.getSamplerMetric("all");
+	log.debug("{}: handleSampleResults: cumulatedMetrics(hits={}, errors={}, success={}, total={})",
+			listenerName,
+			allCumulatedMetrics.getHits(), allCumulatedMetrics.getErrors(), allCumulatedMetrics.getSuccesses(),
+			allCumulatedMetrics.getTotal());
+}
+
+/**
+ * Process an individual HTTP request and collect metrics for Batch 1 & 3.
+ */
+private void processIndividualRequest(SampleResult sampleResult) {
+	String requestName = sampleResult.getSampleLabel();
+	log.info("{}: >> PROCESSING INDIVIDUAL REQUEST: {}", listenerName, requestName);
+	
+	// Collect response times for percentile calculations (Batch 1)
+	TransactionMetricsHolder holder = transactionMetricsHolders.computeIfAbsent(requestName,
+			k -> new TransactionMetricsHolder());
+	holder.addResponseTime(sampleResult.getTime());
+	holder.incrementRequestCount();
+	
+	// Collect metrics by response code and error description (Batch 3)
+	String responseCode = sampleResult.getResponseCode();
+	String errorDescription = sampleResult.isSuccessful() ? "" : sampleResult.getResponseMessage();
+	
+	log.info("{}: >> Creating metrics for: request={}, responseCode={}, errorDescription={}", 
+			listenerName, requestName, responseCode, errorDescription);
+	
+	TransactionResponseCodeMetrics rcMetrics = transactionResponseCodeMetrics.computeIfAbsent(requestName,
+			k -> new TransactionResponseCodeMetrics());
+	ResponseCodeMetricsHolder rcHolder = rcMetrics.getOrCreate(responseCode, errorDescription);
+	rcHolder.addResponseTime(sampleResult.getTime());
+	rcHolder.incrementRequestCount();
+	rcHolder.addSentBytes(sampleResult.getSentBytes());
+	rcHolder.addReceivedBytes(sampleResult.getResponseData().length);
+	if (!sampleResult.isSuccessful()) {
+		rcHolder.incrementErrorCount();
+	}
+	
+	log.info("{}: >> Request metrics collected successfully", listenerName);
+}
 
 	@Override
 	public void run() {
@@ -255,58 +294,71 @@ public class MintBackendListener extends AbstractBackendListenerClient implement
 	}
 
 	private void sendMetrics() {
-		final Iterator<Entry<String, SamplerMetric>> iterator = getMetricsPerSampler().entrySet().iterator();
-		
-		// Track total hits for test-level throughput (Batch 1)
-		long totalHits = 0;
+	final Iterator<Entry<String, SamplerMetric>> iterator = getMetricsPerSampler().entrySet().iterator();
+	
+	// Track total hits for test-level throughput (Batch 1)
+	long totalHits = 0;
 
-		while (true) {
-			if (!iterator.hasNext()) {
-				break;
-			}
+	while (true) {
+		if (!iterator.hasNext()) {
+			break;
+		}
 
-			Entry<String, SamplerMetric> entry = iterator.next();
-			SamplerMetric metric = entry.getValue();
-			if ((entry.getKey()).equals("all")) {
-				// addCumulatedMetrics(metric);
-			} else {
-				String transaction = entry.getKey();
-				log.debug("Checking if SampleLabel '{}' matches Regex '{}'", transaction, sendSamplersByRegex);
-				Matcher matcher = samplersToFilter.matcher(transaction);
-				if (matcher.find()) {
-					log.debug("Adding SampleLabel '{}' to samplerMetric-List", transaction);
+		Entry<String, SamplerMetric> entry = iterator.next();
+		SamplerMetric metric = entry.getValue();
+		if ((entry.getKey()).equals("all")) {
+			// addCumulatedMetrics(metric);
+		} else {
+			String transaction = entry.getKey();
+			log.debug("Checking if SampleLabel '{}' matches Regex '{}'", transaction, sendSamplersByRegex);
+			Matcher matcher = samplersToFilter.matcher(transaction);
+			if (matcher.find()) {
+				log.debug("Adding SampleLabel '{}' to samplerMetric-List", transaction);
+				// Skip Transaction Controller entries - we'll handle them separately
+				// Only process if this is NOT a transaction controller parent
+				if (!transactionGroupMetricsHolders.containsKey(transaction)) {
 					addMetricsForTransaction(transaction, metric);
 					totalHits += metric.getHits();
-				} else {
-					log.debug("SampleLabel '{}' does not match Regex '{}'", transaction, sendSamplersByRegex);
 				}
+			} else {
+				log.debug("SampleLabel '{}' does not match Regex '{}'", transaction, sendSamplersByRegex);
 			}
-			metric.resetForTimeInterval();
 		}
-
-		// NEW (Batch 2): Emit Transaction Group metrics
-		for (TransactionGroupMetricsHolder groupHolder : transactionGroupMetricsHolders.values()) {
-			addMetricsForTransactionGroup(groupHolder);
-		}
-
-		UserMetric userMetrics = this.getUserMetrics();
-		addMetricLineForTest("jmeter.usermetrics.minactivethreads", userMetrics.getMinActiveThreads());
-		addMetricLineForTest("jmeter.usermetrics.maxactivethreads", userMetrics.getMaxActiveThreads());
-		addMetricLineForTest("jmeter.usermetrics.meanactivethreads", userMetrics.getMeanActiveThreads());
-		addMetricLineForTest("jmeter.usermetrics.startedthreads", userMetrics.getStartedThreads());
-		addMetricLineForTest("jmeter.usermetrics.finishedthreads", userMetrics.getFinishedThreads());
-		
-		// Emit test-level throughput (Batch 1)
-		addMetricLineForTest("jmeter.usermetrics.throughput", 
-				(int) PercentileCalculator.calculateThroughput(totalHits, SEND_INTERVAL));
-
-		mintMetricSender.writeAndSendMetrics();
-		
-		// Reset holders for next interval
-		transactionMetricsHolders.clear();
-		transactionResponseCodeMetrics.clear();
-		transactionGroupMetricsHolders.clear();
+		metric.resetForTimeInterval();
 	}
+
+	// NEW (Batch 2): Emit Transaction Group metrics
+	for (TransactionGroupMetricsHolder groupHolder : transactionGroupMetricsHolders.values()) {
+		addMetricsForTransactionGroup(groupHolder);
+	}
+
+	// NEW: Emit all collected request-level metrics (from subsamples)
+	for (String requestName : transactionResponseCodeMetrics.keySet()) {
+		SamplerMetric metric = new SamplerMetric();
+		addMetricsForTransaction(requestName, metric);
+		totalHits += transactionResponseCodeMetrics.get(requestName).getAllMetrics().stream()
+				.mapToLong(ResponseCodeMetricsHolder::getRequestCount)
+				.sum();
+	}
+
+	UserMetric userMetrics = this.getUserMetrics();
+	addMetricLineForTest("jmeter.usermetrics.minactivethreads", userMetrics.getMinActiveThreads());
+	addMetricLineForTest("jmeter.usermetrics.maxactivethreads", userMetrics.getMaxActiveThreads());
+	addMetricLineForTest("jmeter.usermetrics.meanactivethreads", userMetrics.getMeanActiveThreads());
+	addMetricLineForTest("jmeter.usermetrics.startedthreads", userMetrics.getStartedThreads());
+	addMetricLineForTest("jmeter.usermetrics.finishedthreads", userMetrics.getFinishedThreads());
+	
+	// Emit test-level throughput (Batch 1)
+	addMetricLineForTest("jmeter.usermetrics.throughput", 
+			(int) PercentileCalculator.calculateThroughput(totalHits, SEND_INTERVAL));
+
+	mintMetricSender.writeAndSendMetrics();
+	
+	// Reset holders for next interval
+	transactionMetricsHolders.clear();
+	transactionResponseCodeMetrics.clear();
+	transactionGroupMetricsHolders.clear();
+}
 
 	private void addMetricLineForTest(String metricKey, int metricValue) {
 		MintMetricsLine line = new MintMetricsLine(metricKey);
