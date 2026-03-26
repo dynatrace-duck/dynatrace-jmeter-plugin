@@ -60,8 +60,11 @@ public class MintBackendListener extends AbstractBackendListenerClient implement
 	// Metrics holders for percentiles and throughput (Batch 1)
 	private Map<String, TransactionMetricsHolder> transactionMetricsHolders = new HashMap<>();
 	
-	// NEW: Response code metrics for Batch 3
+	// Response code metrics for Batch 3
 	private Map<String, TransactionResponseCodeMetrics> transactionResponseCodeMetrics = new HashMap<>();
+	
+	// NEW: Transaction Group metrics (Batch 2)
+	private Map<String, TransactionGroupMetricsHolder> transactionGroupMetricsHolders = new HashMap<>();
 
 	static {
 		DEFAULT_ARGS.put("dynatraceMetricIngestUrl", "https://DT_SERVER/api/v2/metrics/ingest");
@@ -161,54 +164,119 @@ public class MintBackendListener extends AbstractBackendListenerClient implement
 	}
 
 	@Override
-  public void handleSampleResults(List<SampleResult> sampleResults,
-      BackendListenerContext backendListenerContext) {
-    log.debug("{}: handleSampleResults for {} samples", listenerName, sampleResults.size());
+public void handleSampleResults(List<SampleResult> sampleResults,
+		BackendListenerContext backendListenerContext) {
+	log.debug("{}: handleSampleResults for {} samples", listenerName, sampleResults.size());
 
-    UserMetric userMetrics = getUserMetrics();
+	UserMetric userMetrics = getUserMetrics();
 
-    for (SampleResult sampleResult : sampleResults) {
-      userMetrics.add(sampleResult);
+	for (SampleResult sampleResult : sampleResults) {
+		log.info("{}: Processing sample: {} | Type: {} | SubResults: {}", 
+				listenerName, 
+				sampleResult.getSampleLabel(),
+				sampleResult.getClass().getSimpleName(),
+				sampleResult.getSubResults() != null ? sampleResult.getSubResults().length : "null");
+		
+		userMetrics.add(sampleResult);
 
-      SamplerMetric samplerMetric = this.getSamplerMetric(sampleResult.getSampleLabel());
-      samplerMetric.add(sampleResult);
+		SamplerMetric samplerMetric = this.getSamplerMetric(sampleResult.getSampleLabel());
+		samplerMetric.add(sampleResult);
 
-      final SamplerMetric cumulatedMetrics = this.getSamplerMetric(sampleResult.getSampleLabel());
-      cumulatedMetrics.add(sampleResult);
-      
-      // Collect response times for percentile calculations (Batch 1)
-      String transactionName = sampleResult.getSampleLabel();
-      TransactionMetricsHolder holder = transactionMetricsHolders.computeIfAbsent(transactionName,
-          k -> new TransactionMetricsHolder());
-      holder.addResponseTime(sampleResult.getTime());
-      holder.incrementRequestCount();
-      
-      // NEW: Collect metrics by response code and error description (Batch 3)
-      String responseCode = sampleResult.getResponseCode();
-      String errorDescription = sampleResult.isSuccessful() ? "" : sampleResult.getResponseMessage();
-      
-      TransactionResponseCodeMetrics rcMetrics = transactionResponseCodeMetrics.computeIfAbsent(transactionName,
-          k -> new TransactionResponseCodeMetrics());
-      ResponseCodeMetricsHolder rcHolder = rcMetrics.getOrCreate(responseCode, errorDescription);
-      rcHolder.addResponseTime(sampleResult.getTime());
-      rcHolder.incrementRequestCount();
-      rcHolder.addSentBytes(sampleResult.getSentBytes());
-      rcHolder.addReceivedBytes(sampleResult.getResponseData().length);
-      if (!sampleResult.isSuccessful()) {
-        rcHolder.incrementErrorCount();
-      }
-    }
+		final SamplerMetric cumulatedMetrics = this.getSamplerMetric(sampleResult.getSampleLabel());
+		cumulatedMetrics.add(sampleResult);
+		
+		// Check if this is a Transaction Controller parent sample (has subsamples)
+		SampleResult[] subResults = sampleResult.getSubResults();
+		boolean isTransactionControllerParent = subResults != null && subResults.length > 0;
+		
+		log.info("{}: isTransactionControllerParent = {} for sample: {}", 
+				listenerName, isTransactionControllerParent, sampleResult.getSampleLabel());
+		
+		if (isTransactionControllerParent) {
+			log.info("{}: DETECTED TRANSACTION CONTROLLER: {} with {} subsamples", 
+					listenerName, sampleResult.getSampleLabel(), subResults.length);
+			
+			// Handle Transaction Group (Batch 2)
+			String groupName = sampleResult.getSampleLabel();
+			TransactionGroupMetricsHolder groupHolder = transactionGroupMetricsHolders.computeIfAbsent(groupName,
+					k -> new TransactionGroupMetricsHolder(groupName));
+			
+			// Add the transaction group's elapsed time (the parent's total time)
+			groupHolder.addElapsedTime(sampleResult.getTime());
+			
+			// Process each child sample individually (Batch 3)
+			for (int i = 0; i < subResults.length; i++) {
+				SampleResult childSample = subResults[i];
+				log.info("{}: Processing child sample [{}/{}]: {} | Response Code: {} | Success: {}", 
+						listenerName, 
+						i + 1, 
+						subResults.length,
+						childSample.getSampleLabel(),
+						childSample.getResponseCode(),
+						childSample.isSuccessful());
+				
+				// Emit individual request metrics for each child
+				processIndividualRequest(childSample);
+				
+				// Aggregate stats from this child into the group
+				groupHolder.addCount(1);
+				if (!childSample.isSuccessful()) {
+					groupHolder.addErrors(1);
+				}
+				groupHolder.addSentBytes(childSample.getSentBytes());
+				groupHolder.addReceivedBytes(childSample.getResponseData().length);
+			}
+		} else {
+			// This is a standalone HTTP request (not in a Transaction Controller)
+			log.info("{}: Processing STANDALONE request: {}", listenerName, sampleResult.getSampleLabel());
+			processIndividualRequest(sampleResult);
+		}
+	}
 
-    log.debug("{}: handleSampleResults: UserMetrics(startedThreads={}, finishedThreads={})",
-        listenerName,
-        getUserMetrics().getStartedThreads(),
-        getUserMetrics().getFinishedThreads());
-    final SamplerMetric allCumulatedMetrics = this.getSamplerMetric("all");
-    log.debug("{}: handleSampleResults: cumulatedMetrics(hits={}, errors={}, success={}, total={})",
-        listenerName,
-        allCumulatedMetrics.getHits(), allCumulatedMetrics.getErrors(), allCumulatedMetrics.getSuccesses(),
-        allCumulatedMetrics.getTotal());
-  }
+	log.debug("{}: handleSampleResults: UserMetrics(startedThreads={}, finishedThreads={})",
+			listenerName,
+			getUserMetrics().getStartedThreads(),
+			getUserMetrics().getFinishedThreads());
+	final SamplerMetric allCumulatedMetrics = this.getSamplerMetric("all");
+	log.debug("{}: handleSampleResults: cumulatedMetrics(hits={}, errors={}, success={}, total={})",
+			listenerName,
+			allCumulatedMetrics.getHits(), allCumulatedMetrics.getErrors(), allCumulatedMetrics.getSuccesses(),
+			allCumulatedMetrics.getTotal());
+}
+
+/**
+ * Process an individual HTTP request and collect metrics for Batch 1 & 3.
+ */
+private void processIndividualRequest(SampleResult sampleResult) {
+	String requestName = sampleResult.getSampleLabel();
+	log.info("{}: >> PROCESSING INDIVIDUAL REQUEST: {}", listenerName, requestName);
+	
+	// Collect response times for percentile calculations (Batch 1)
+	TransactionMetricsHolder holder = transactionMetricsHolders.computeIfAbsent(requestName,
+			k -> new TransactionMetricsHolder());
+	holder.addResponseTime(sampleResult.getTime());
+	holder.incrementRequestCount();
+	
+	// Collect metrics by response code and error description (Batch 3)
+	String responseCode = sampleResult.getResponseCode();
+	String errorDescription = sampleResult.isSuccessful() ? "" : sampleResult.getResponseMessage();
+	
+	log.info("{}: >> Creating metrics for: request={}, responseCode={}, errorDescription={}", 
+			listenerName, requestName, responseCode, errorDescription);
+	
+	TransactionResponseCodeMetrics rcMetrics = transactionResponseCodeMetrics.computeIfAbsent(requestName,
+			k -> new TransactionResponseCodeMetrics());
+	ResponseCodeMetricsHolder rcHolder = rcMetrics.getOrCreate(responseCode, errorDescription);
+	rcHolder.addResponseTime(sampleResult.getTime());
+	rcHolder.incrementRequestCount();
+	rcHolder.addSentBytes(sampleResult.getSentBytes());
+	rcHolder.addReceivedBytes(sampleResult.getResponseData().length);
+	if (!sampleResult.isSuccessful()) {
+		rcHolder.incrementErrorCount();
+	}
+	
+	log.info("{}: >> Request metrics collected successfully", listenerName);
+}
 
 	@Override
 	public void run() {
@@ -226,52 +294,71 @@ public class MintBackendListener extends AbstractBackendListenerClient implement
 	}
 
 	private void sendMetrics() {
-		final Iterator<Entry<String, SamplerMetric>> iterator = getMetricsPerSampler().entrySet().iterator();
-		
-		// Track total hits for test-level throughput (Batch 1)
-		long totalHits = 0;
+	final Iterator<Entry<String, SamplerMetric>> iterator = getMetricsPerSampler().entrySet().iterator();
+	
+	// Track total hits for test-level throughput (Batch 1)
+	long totalHits = 0;
 
-		while (true) {
-			if (!iterator.hasNext()) {
-				break;
-			}
-
-			Entry<String, SamplerMetric> entry = iterator.next();
-			SamplerMetric metric = entry.getValue();
-			if ((entry.getKey()).equals("all")) {
-				// addCumulatedMetrics(metric);
-			} else {
-				String transaction = entry.getKey();
-				log.debug("Checking if SampleLabel '{}' matches Regex '{}'", transaction, sendSamplersByRegex);
-				Matcher matcher = samplersToFilter.matcher(transaction);
-				if (matcher.find()) {
-					log.debug("Adding SampleLabel '{}' to samplerMetric-List", transaction);
-					addMetricsForTransaction(transaction, metric);
-					totalHits += metric.getHits();
-				} else {
-					log.debug("SampleLabel '{}' does not match Regex '{}'", transaction, sendSamplersByRegex);
-				}
-			}
-			metric.resetForTimeInterval();
+	while (true) {
+		if (!iterator.hasNext()) {
+			break;
 		}
 
-		UserMetric userMetrics = this.getUserMetrics();
-		addMetricLineForTest("jmeter.usermetrics.minactivethreads", userMetrics.getMinActiveThreads());
-		addMetricLineForTest("jmeter.usermetrics.maxactivethreads", userMetrics.getMaxActiveThreads());
-		addMetricLineForTest("jmeter.usermetrics.meanactivethreads", userMetrics.getMeanActiveThreads());
-		addMetricLineForTest("jmeter.usermetrics.startedthreads", userMetrics.getStartedThreads());
-		addMetricLineForTest("jmeter.usermetrics.finishedthreads", userMetrics.getFinishedThreads());
-		
-		// Emit test-level throughput (Batch 1)
-		addMetricLineForTest("jmeter.usermetrics.throughput", 
-				(int) PercentileCalculator.calculateThroughput(totalHits, SEND_INTERVAL));
-
-		mintMetricSender.writeAndSendMetrics();
-		
-		// Reset holders for next interval
-		transactionMetricsHolders.clear();
-		transactionResponseCodeMetrics.clear();
+		Entry<String, SamplerMetric> entry = iterator.next();
+		SamplerMetric metric = entry.getValue();
+		if ((entry.getKey()).equals("all")) {
+			// addCumulatedMetrics(metric);
+		} else {
+			String transaction = entry.getKey();
+			log.debug("Checking if SampleLabel '{}' matches Regex '{}'", transaction, sendSamplersByRegex);
+			Matcher matcher = samplersToFilter.matcher(transaction);
+			if (matcher.find()) {
+				log.debug("Adding SampleLabel '{}' to samplerMetric-List", transaction);
+				// Skip Transaction Controller entries - we'll handle them separately
+				// Only process if this is NOT a transaction controller parent
+				if (!transactionGroupMetricsHolders.containsKey(transaction)) {
+					addMetricsForTransaction(transaction, metric);
+					totalHits += metric.getHits();
+				}
+			} else {
+				log.debug("SampleLabel '{}' does not match Regex '{}'", transaction, sendSamplersByRegex);
+			}
+		}
+		metric.resetForTimeInterval();
 	}
+
+	// NEW (Batch 2): Emit Transaction Group metrics
+	for (TransactionGroupMetricsHolder groupHolder : transactionGroupMetricsHolders.values()) {
+		addMetricsForTransactionGroup(groupHolder);
+	}
+
+	// NEW: Emit all collected request-level metrics (from subsamples)
+	for (String requestName : transactionResponseCodeMetrics.keySet()) {
+		SamplerMetric metric = new SamplerMetric();
+		addMetricsForTransaction(requestName, metric);
+		totalHits += transactionResponseCodeMetrics.get(requestName).getAllMetrics().stream()
+				.mapToLong(ResponseCodeMetricsHolder::getRequestCount)
+				.sum();
+	}
+
+	UserMetric userMetrics = this.getUserMetrics();
+	addMetricLineForTest("jmeter.usermetrics.minactivethreads", userMetrics.getMinActiveThreads());
+	addMetricLineForTest("jmeter.usermetrics.maxactivethreads", userMetrics.getMaxActiveThreads());
+	addMetricLineForTest("jmeter.usermetrics.meanactivethreads", userMetrics.getMeanActiveThreads());
+	addMetricLineForTest("jmeter.usermetrics.startedthreads", userMetrics.getStartedThreads());
+	addMetricLineForTest("jmeter.usermetrics.finishedthreads", userMetrics.getFinishedThreads());
+	
+	// Emit test-level throughput (Batch 1)
+	addMetricLineForTest("jmeter.usermetrics.throughput", 
+			(int) PercentileCalculator.calculateThroughput(totalHits, SEND_INTERVAL));
+
+	mintMetricSender.writeAndSendMetrics();
+	
+	// Reset holders for next interval
+	transactionMetricsHolders.clear();
+	transactionResponseCodeMetrics.clear();
+	transactionGroupMetricsHolders.clear();
+}
 
 	private void addMetricLineForTest(String metricKey, int metricValue) {
 		MintMetricsLine line = new MintMetricsLine(metricKey);
@@ -281,70 +368,136 @@ public class MintBackendListener extends AbstractBackendListenerClient implement
 	}
 
 	private void addMetricsForTransaction(String transaction, SamplerMetric metric) {
-	// Emit metrics split by response code and error description (Batch 3)
-	TransactionResponseCodeMetrics rcMetrics = transactionResponseCodeMetrics.get(transaction);
-	if (rcMetrics != null && !rcMetrics.getAllMetrics().isEmpty()) {
-		for (ResponseCodeMetricsHolder rcHolder : rcMetrics.getAllMetrics()) {
-			String responseCode = rcHolder.getResponseCode();
-			String errorDescription = rcHolder.getErrorDescription();
-			List<Long> responseTimes = rcHolder.getResponseTimes();
+    // Emit metrics split by response code and error description (Batch 3)
+    TransactionResponseCodeMetrics rcMetrics = transactionResponseCodeMetrics.get(transaction);
+    if (rcMetrics != null && !rcMetrics.getAllMetrics().isEmpty()) {
+      for (ResponseCodeMetricsHolder rcHolder : rcMetrics.getAllMetrics()) {
+        String responseCode = rcHolder.getResponseCode();
+        String errorDescription = rcHolder.getErrorDescription();
+        List<Long> responseTimes = rcHolder.getResponseTimes();
+        
+        // Calculate min, max, mean for this response code group
+        long minTime = responseTimes.isEmpty() ? 0 : responseTimes.stream().mapToLong(Long::longValue).min().orElse(0);
+        long maxTime = responseTimes.isEmpty() ? 0 : responseTimes.stream().mapToLong(Long::longValue).max().orElse(0);
+        double meanTime = responseTimes.isEmpty() ? 0 : responseTimes.stream().mapToLong(Long::longValue).average().orElse(0);
+        
+        // Emit all metrics for this specific response code/error combination
+        addMetricLineForRequest(transaction, "jmeter.usermetrics.transaction.count", 
+            rcHolder.getRequestCount(), responseCode, errorDescription);
+        addMetricLineForRequest(transaction, "jmeter.usermetrics.transaction.success", 
+            rcHolder.getRequestCount() - rcHolder.getErrorCount(), responseCode, errorDescription);
+        addMetricLineForRequest(transaction, "jmeter.usermetrics.transaction.error", 
+            rcHolder.getErrorCount(), responseCode, errorDescription);
+        addMetricLineForRequest(transaction, "jmeter.usermetrics.transaction.hits", 
+            rcHolder.getRequestCount(), responseCode, errorDescription);
+        addMetricLineForRequest(transaction, "jmeter.usermetrics.transaction.mintime", 
+            minTime, responseCode, errorDescription);
+        addMetricLineForRequest(transaction, "jmeter.usermetrics.transaction.maxtime", 
+            maxTime, responseCode, errorDescription);
+        addMetricLineForRequest(transaction, "jmeter.usermetrics.transaction.meantime", 
+            meanTime, responseCode, errorDescription);
+        addMetricLineForRequest(transaction, "jmeter.usermetrics.transaction.sentbytes", 
+            rcHolder.getSentBytes(), responseCode, errorDescription);
+        addMetricLineForRequest(transaction, "jmeter.usermetrics.transaction.receivedbytes", 
+            rcHolder.getReceivedBytes(), responseCode, errorDescription);
+        
+        // Emit percentiles for this response code
+        if (!responseTimes.isEmpty()) {
+          addMetricLineForRequest(transaction, "jmeter.usermetrics.transaction.p50time", 
+              PercentileCalculator.calculateP50(responseTimes), responseCode, errorDescription);
+          addMetricLineForRequest(transaction, "jmeter.usermetrics.transaction.p90time", 
+              PercentileCalculator.calculateP90(responseTimes), responseCode, errorDescription);
+          addMetricLineForRequest(transaction, "jmeter.usermetrics.transaction.p95time", 
+              PercentileCalculator.calculateP95(responseTimes), responseCode, errorDescription);
+          addMetricLineForRequest(transaction, "jmeter.usermetrics.transaction.p99time", 
+              PercentileCalculator.calculateP99(responseTimes), responseCode, errorDescription);
+          
+          // Emit throughput for this response code
+          double throughput = PercentileCalculator.calculateThroughput(rcHolder.getRequestCount(), SEND_INTERVAL);
+          addMetricLineForRequest(transaction, "jmeter.usermetrics.transaction.throughput", 
+              throughput, responseCode, errorDescription);
+        }
+      }
+    }
+  }
+
+	// NEW (Batch 2): Emit metrics for Transaction Groups
+	private void addMetricsForTransactionGroup(TransactionGroupMetricsHolder groupHolder) {
+		String groupName = groupHolder.getGroupName();
+		List<Long> elapsedTimes = groupHolder.getElapsedTimes();
+		
+		// Calculate min, max, mean for the group's elapsed times
+		long minTime = elapsedTimes.isEmpty() ? 0 : elapsedTimes.stream().mapToLong(Long::longValue).min().orElse(0);
+		long maxTime = elapsedTimes.isEmpty() ? 0 : elapsedTimes.stream().mapToLong(Long::longValue).max().orElse(0);
+		double meanTime = elapsedTimes.isEmpty() ? 0 : elapsedTimes.stream().mapToLong(Long::longValue).average().orElse(0);
+		
+		// Emit all metrics for the transaction group (no response_code or error_description)
+		addMetricLineForTransactionGroup(groupName, "jmeter.usermetrics.transaction.count", 
+				groupHolder.getTotalCount());
+		addMetricLineForTransactionGroup(groupName, "jmeter.usermetrics.transaction.success", 
+				groupHolder.getTotalCount() - groupHolder.getTotalErrors());
+		addMetricLineForTransactionGroup(groupName, "jmeter.usermetrics.transaction.error", 
+				groupHolder.getTotalErrors());
+		addMetricLineForTransactionGroup(groupName, "jmeter.usermetrics.transaction.hits", 
+				groupHolder.getTotalCount());
+		addMetricLineForTransactionGroup(groupName, "jmeter.usermetrics.transaction.mintime", 
+				minTime);
+		addMetricLineForTransactionGroup(groupName, "jmeter.usermetrics.transaction.maxtime", 
+				maxTime);
+		addMetricLineForTransactionGroup(groupName, "jmeter.usermetrics.transaction.meantime", 
+				meanTime);
+		addMetricLineForTransactionGroup(groupName, "jmeter.usermetrics.transaction.sentbytes", 
+				groupHolder.getTotalSentBytes());
+		addMetricLineForTransactionGroup(groupName, "jmeter.usermetrics.transaction.receivedbytes", 
+				groupHolder.getTotalReceivedBytes());
+		
+		// Emit percentiles for the transaction group
+		if (!elapsedTimes.isEmpty()) {
+			addMetricLineForTransactionGroup(groupName, "jmeter.usermetrics.transaction.p50time", 
+					PercentileCalculator.calculateP50(elapsedTimes));
+			addMetricLineForTransactionGroup(groupName, "jmeter.usermetrics.transaction.p90time", 
+					PercentileCalculator.calculateP90(elapsedTimes));
+			addMetricLineForTransactionGroup(groupName, "jmeter.usermetrics.transaction.p95time", 
+					PercentileCalculator.calculateP95(elapsedTimes));
+			addMetricLineForTransactionGroup(groupName, "jmeter.usermetrics.transaction.p99time", 
+					PercentileCalculator.calculateP99(elapsedTimes));
 			
-			// Calculate min, max, mean for this response code group
-			long minTime = responseTimes.isEmpty() ? 0 : responseTimes.stream().mapToLong(Long::longValue).min().orElse(0);
-			long maxTime = responseTimes.isEmpty() ? 0 : responseTimes.stream().mapToLong(Long::longValue).max().orElse(0);
-			double meanTime = responseTimes.isEmpty() ? 0 : responseTimes.stream().mapToLong(Long::longValue).average().orElse(0);
-			
-			// Emit all metrics for this specific response code/error combination
-			addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.count", 
-					rcHolder.getRequestCount(), responseCode, errorDescription);
-			addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.success", 
-					rcHolder.getRequestCount() - rcHolder.getErrorCount(), responseCode, errorDescription);
-			addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.error", 
-					rcHolder.getErrorCount(), responseCode, errorDescription);
-			addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.hits", 
-					rcHolder.getRequestCount(), responseCode, errorDescription);
-			addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.mintime", 
-					minTime, responseCode, errorDescription);
-			addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.maxtime", 
-					maxTime, responseCode, errorDescription);
-			addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.meantime", 
-					meanTime, responseCode, errorDescription);
-			addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.sentbytes", 
-					rcHolder.getSentBytes(), responseCode, errorDescription);
-			addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.receivedbytes", 
-					rcHolder.getReceivedBytes(), responseCode, errorDescription);
-			
-			// Emit percentiles for this response code
-			if (!responseTimes.isEmpty()) {
-				addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.p50time", 
-						PercentileCalculator.calculateP50(responseTimes), responseCode, errorDescription);
-				addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.p90time", 
-						PercentileCalculator.calculateP90(responseTimes), responseCode, errorDescription);
-				addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.p95time", 
-						PercentileCalculator.calculateP95(responseTimes), responseCode, errorDescription);
-				addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.p99time", 
-						PercentileCalculator.calculateP99(responseTimes), responseCode, errorDescription);
-				
-				// Emit throughput for this response code
-				double throughput = PercentileCalculator.calculateThroughput(rcHolder.getRequestCount(), SEND_INTERVAL);
-				addMetricLineForTransaction(transaction, "jmeter.usermetrics.transaction.throughput", 
-						throughput, responseCode, errorDescription);
-			}
+			// Emit throughput for the transaction group
+			double throughput = PercentileCalculator.calculateThroughput(groupHolder.getTotalCount(), SEND_INTERVAL);
+			addMetricLineForTransactionGroup(groupName, "jmeter.usermetrics.transaction.throughput", 
+					throughput);
 		}
 	}
-}
 
-	private void addMetricLineForTransaction(String transaction, String metricKey, double metricValue, 
-			String responseCode, String errorDescription) {
-		MintMetricsLine line = new MintMetricsLine(metricKey);
-		addTransactionDimensions(transaction, line, responseCode, errorDescription);
-		line.addGauge(new MintGauge(metricValue));
-		mintMetricSender.addMetric(line);
-	}
+	private void addMetricLineForRequest(String request, String metricKey, double metricValue, String responseCode, String errorDescription) {
+    MintMetricsLine line = new MintMetricsLine(metricKey);
+    addRequestDimensions(request, line, responseCode, errorDescription);
+    line.addGauge(new MintGauge(metricValue));
+    mintMetricSender.addMetric(line);
+  }
 
-  private void addTransactionDimensions(String transaction, MintMetricsLine metricsLine, 
-      String responseCode, String errorDescription) {
-    metricsLine.addDimension(new MintDimension("transaction", SchemalessMetricSanitizer.sanitizeDimensionValue(transaction)));
+	private void addMetricLineForTransactionGroup(String groupName, String metricKey, double metricValue) {
+    // Replace 'jmeter.usermetrics.transaction.' with 'jmeter.usermetrics.transaction_group.'
+    String updatedMetricKey = metricKey.replace("jmeter.usermetrics.transaction.", "jmeter.usermetrics.transaction_group.");
+    
+    MintMetricsLine line = new MintMetricsLine(updatedMetricKey);
+    line.addDimension(new MintDimension("group", SchemalessMetricSanitizer.sanitizeDimensionValue(groupName)));
+    
+    // Add user-configured transaction dimensions
+    transactionDimensions.forEach((key, value) -> {
+      if (!key.trim().isEmpty() && !value.trim().isEmpty())
+        line.addDimension(
+            new MintDimension(SchemalessMetricSanitizer.sanitizeDimensionIdentifier(key),
+                SchemalessMetricSanitizer.sanitizeDimensionValue(value)));
+    });
+    
+    line.addGauge(new MintGauge(metricValue));
+    mintMetricSender.addMetric(line);
+  }
+
+	private void addRequestDimensions(String request, MintMetricsLine metricsLine, 
+		String responseCode, String errorDescription) {
+    metricsLine.addDimension(new MintDimension("request", SchemalessMetricSanitizer.sanitizeDimensionValue(request)));
     
     // Add response code dimension if not empty (lowercase key as per Dynatrace requirements)
     if (responseCode != null && !responseCode.isEmpty()) {
@@ -363,7 +516,7 @@ public class MintBackendListener extends AbstractBackendListenerClient implement
             new MintDimension(SchemalessMetricSanitizer.sanitizeDimensionIdentifier(key),
                 SchemalessMetricSanitizer.sanitizeDimensionValue(value)));
     });
-  }
+}
 
 	private void addTestDimensions(MintMetricsLine metricsLine) {
 		testDimensions.forEach((key, value) -> {
