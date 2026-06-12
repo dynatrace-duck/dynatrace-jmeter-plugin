@@ -11,7 +11,7 @@ final class DynatraceMetricLineBuilder {
     private static final Pattern DIMENSION_KEY_PATTERN = Pattern.compile("[a-z0-9_.:-]+");
 
     private static final String METRIC_PREFIX = "jmeter.mint";
-    private static final String TRANSACTION_DIMENSION = "SampleLabel";
+    private static final String TRANSACTION_DIMENSION = "samplelabel";
     private static final String INJECTOR_HOSTNAME_DIMENSION = "injector_hostname";
 
     private DynatraceMetricLineBuilder() {
