@@ -22,7 +22,7 @@ public class TestDynatraceMetricLineBuilder {
                 1710000000000L);
 
         assertEquals(
-                "jmeter.mint.p95,SampleLabel=\"GET /api/orders\\\\active\\\"\","
+                "jmeter.mint.p95,samplelabel=\"GET /api/orders\\\\active\\\"\","
                         + "injector_hostname=\"loadgen-01\",environment=\"staging\",team=\"checkout\\\\\\\"ops\" "
                         + "gauge,218.5 1710000000000",
                 metricLine);
@@ -38,6 +38,6 @@ public class TestDynatraceMetricLineBuilder {
 
     @Test(expected = IllegalArgumentException.class)
     public void rejectsStaticTransactionOverride() {
-        DynatraceMetricLineBuilder.parseStaticDimensions("SampleLabel=override");
+        DynatraceMetricLineBuilder.parseStaticDimensions("samplelabel=override");
     }
 }
