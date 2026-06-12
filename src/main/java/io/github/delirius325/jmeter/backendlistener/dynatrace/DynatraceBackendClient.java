@@ -14,7 +14,8 @@ import org.slf4j.LoggerFactory;
 import com.google.gson.Gson;
 
 import io.github.delirius325.jmeter.backendlistener.dynatrace.metrics.MintMetricsCollector;
-import io.github.delirius325.jmeter.backendlistener.dynatrace.metrics.MintMetricEnricher;
+import io.github.delirius325.jmeter.backendlistener.dynatrace.metrics.DynatraceMetricsSender;
+import io.github.delirius325.jmeter.backendlistener.dynatrace.metrics.PercentileCalculator;
 
 public class DynatraceBackendClient extends AbstractBackendListenerClient {
 
@@ -56,7 +57,7 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
     private int bulkSize;
     private long timeoutMs;
     private MintMetricsCollector mintCollector;
-    private MintMetricEnricher mintEnricher;
+    private DynatraceMetricsSender metricsSender;
     private boolean mintEnabled;
 
     @Override
@@ -87,7 +88,10 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
             // Initialize MINT metrics components if enabled
             if (this.mintEnabled) {
                 this.mintCollector = new MintMetricsCollector();
-                this.mintEnricher = new MintMetricEnricher(this.mintCollector);
+                this.metricsSender = new DynatraceMetricsSender(
+                        context.getParameter(DT_URL),
+                        context.getParameter(DT_API_TOKEN),
+                        (int) this.timeoutMs);
                 logger.info("MINT percentile metrics collection enabled");
             }
 
@@ -107,10 +111,8 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
                     context.getBooleanParameter(DT_PARSE_RES_HEADERS, false), fields,
                     context.getParameter(DT_LOG_SOURCE));
 
-            // Set the MINT enricher if enabled
-            if (this.mintEnabled && this.mintEnricher != null) {
-                metric.setMintEnricher(this.mintEnricher);
-                // Record response times for this sample
+            // Record response times for MINT metrics if enabled
+            if (this.mintEnabled && this.mintCollector != null) {
                 String sampleLabel = sr.getSampleLabel();
                 this.mintCollector.recordTransactionResponseTime(sampleLabel, sr.getTime());
                 this.mintCollector.recordRequestResponseTime(sampleLabel, sr.getTime());
@@ -144,13 +146,29 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
             this.sender.sendRequest();
         }
 
-        // Log MINT metrics summary if enabled
-        if (this.mintEnabled && this.mintCollector != null) {
-            logMintMetricsSummary();
+        // Send MINT metrics separately via Metrics v2 API if enabled
+        if (this.mintEnabled && this.metricsSender != null && this.mintCollector != null) {
+            sendMintMetrics();
         }
 
         this.sender.close();
+        if (this.metricsSender != null) {
+            this.metricsSender.close();
+        }
         super.teardownTest(context);
+    }
+
+    /**
+     * Sends all collected MINT percentile metrics to Dynatrace via Metrics v2 Ingest API.
+     */
+    private void sendMintMetrics() {
+        try {
+            logMintMetricsSummary();
+            this.metricsSender.sendAllMetrics(this.mintCollector);
+            logger.info("MINT metrics successfully sent to Dynatrace");
+        } catch (Exception e) {
+            logger.error("Failed to send MINT metrics to Dynatrace", e);
+        }
     }
 
     /**
