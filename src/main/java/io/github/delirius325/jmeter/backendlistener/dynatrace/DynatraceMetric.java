@@ -19,6 +19,8 @@ import org.slf4j.LoggerFactory;
 
 import static org.apache.commons.lang3.math.NumberUtils.isCreatable;
 
+import io.github.delirius325.jmeter.backendlistener.dynatrace.metrics.MintMetricEnricher;
+
 public class DynatraceMetric {
     private static final Logger logger = LoggerFactory.getLogger(DynatraceMetric.class);
     private static final String HOSTNAME = solveHostName();
@@ -32,6 +34,8 @@ public class DynatraceMetric {
     private Set<String> fields;
     private boolean allReqHeaders;
     private boolean allResHeaders;
+    private MintMetricEnricher mintEnricher;
+    private boolean mintEnabled;
 
     public DynatraceMetric(
             SampleResult sr, String testMode, String timeStamp,
@@ -45,6 +49,19 @@ public class DynatraceMetric {
         this.allReqHeaders = parseReqHeaders;
         this.allResHeaders = parseResHeaders;
         this.fields = fields;
+        this.mintEnricher = null;
+        this.mintEnabled = false;
+    }
+
+    /**
+     * Sets the MINT metric enricher for this metric.
+     * If an enricher is provided, MINT percentiles will be added to the metric.
+     *
+     * @param enricher the MintMetricEnricher instance
+     */
+    public void setMintEnricher(MintMetricEnricher enricher) {
+        this.mintEnricher = enricher;
+        this.mintEnabled = (enricher != null);
     }
 
     private static String solveHostName() {
@@ -60,6 +77,7 @@ public class DynatraceMetric {
      * This method returns the current metric as a Map(String, Object) for the provided sampleResult.
      * The returned map always contains the Dynatrace-required fields "timestamp" and "content",
      * plus all additional sample attributes (subject to the optional field filter).
+     * If MINT metric enrichment is enabled, percentile data will be added.
      *
      * @param context BackendListenerContext
      * @return a JSON Object as Map(String, Object)
@@ -118,8 +136,27 @@ public class DynatraceMetric {
         addElapsedDuration();
         addCustomFields(context);
         parseHeadersAsJsonProps(this.allReqHeaders, this.allResHeaders);
+        
+        // Add MINT percentile metrics if enricher is enabled
+        if (this.mintEnabled && this.mintEnricher != null) {
+            addMintMetrics();
+        }
 
         return this.json;
+    }
+
+    /**
+     * Adds MINT percentile metrics to the JSON output.
+     * Enriches the metric with transaction and request-level p50, p90, p95, p99 values.
+     */
+    private void addMintMetrics() {
+        try {
+            String sampleLabel = this.sampleResult.getSampleLabel();
+            this.mintEnricher.enrichWithBothPercentiles(this.json, sampleLabel, sampleLabel);
+            logger.debug("MINT percentiles added for sample: {}", sampleLabel);
+        } catch (Exception e) {
+            logger.warn("Failed to enrich metric with MINT percentiles", e);
+        }
     }
 
     /**
