@@ -14,7 +14,6 @@ import org.slf4j.LoggerFactory;
 import com.google.gson.Gson;
 
 public class DynatraceBackendClient extends AbstractBackendListenerClient {
-
     private static final String DT_URL = "dt.url";
     private static final String DT_API_TOKEN = "dt.api.token";
     private static final String DT_FIELDS = "dt.fields";
@@ -26,7 +25,16 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
     private static final String DT_PARSE_REQ_HEADERS = "dt.parse.all.req.headers";
     private static final String DT_PARSE_RES_HEADERS = "dt.parse.all.res.headers";
     private static final String DT_LOG_SOURCE = "dt.log.source";
+
+    private static final String DT_METRICS_ENABLED = "dt.metrics.enabled";
+    private static final String DT_METRICS_URL = "dt.metrics.url";
+    private static final String DT_METRICS_API_TOKEN = "dt.metrics.api.token";
+    private static final String DT_METRICS_FLUSH_INTERVAL_MS = "dt.metrics.flush.interval.ms";
+    private static final String DT_METRICS_PERCENTILES = "dt.metrics.percentiles";
+    private static final String DT_METRICS_DIMENSIONS = "dt.metrics.dimensions";
+
     private static final long DEFAULT_TIMEOUT_MS = 10000L;
+    private static final long DEFAULT_METRICS_FLUSH_INTERVAL_MS = 10000L;
     private static final Logger logger = LoggerFactory.getLogger(DynatraceBackendClient.class);
     private static final Map<String, String> DEFAULT_ARGS = new LinkedHashMap<>();
 
@@ -42,9 +50,19 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
         DEFAULT_ARGS.put(DT_PARSE_REQ_HEADERS, "false");
         DEFAULT_ARGS.put(DT_PARSE_RES_HEADERS, "false");
         DEFAULT_ARGS.put(DT_LOG_SOURCE, "jmeter");
+
+        /* Opt-in: disabled means no percentile computation and no Metrics API calls. */
+        DEFAULT_ARGS.put(DT_METRICS_ENABLED, "false");
+        DEFAULT_ARGS.put(DT_METRICS_URL, "https://<env-id>.live.dynatrace.com/api/v2/metrics/ingest");
+        DEFAULT_ARGS.put(DT_METRICS_API_TOKEN, "");
+        DEFAULT_ARGS.put(DT_METRICS_FLUSH_INTERVAL_MS, Long.toString(DEFAULT_METRICS_FLUSH_INTERVAL_MS));
+        DEFAULT_ARGS.put(DT_METRICS_PERCENTILES, "50;90;95;99");
+        DEFAULT_ARGS.put(DT_METRICS_DIMENSIONS, "");
     }
 
     private DynatraceMetricSender sender;
+    private DynatracePercentileMetricsExporter percentileMetricsExporter;
+    private boolean percentileMetricsEnabled;
     private Set<String> modes;
     private Set<String> filters;
     private Set<String> fields;
@@ -66,16 +84,33 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
             this.modes = new HashSet<>(Arrays.asList("info", "debug", "error", "quiet"));
             this.bulkSize = Integer.parseInt(context.getParameter(DT_BATCH_SIZE));
             this.timeoutMs = Long.parseLong(context.getParameter(DT_TIMEOUT_MS));
-
             convertParameterToSet(context, DT_SAMPLE_FILTER, this.filters);
             convertParameterToSet(context, DT_FIELDS, this.fields);
-
             this.sender = new DynatraceMetricSender(
                     context.getParameter(DT_URL),
                     context.getParameter(DT_API_TOKEN),
                     (int) this.timeoutMs);
-
             checkTestMode(context.getParameter(DT_TEST_MODE));
+
+            this.percentileMetricsEnabled = context.getBooleanParameter(DT_METRICS_ENABLED, false);
+            if (this.percentileMetricsEnabled) {
+                String metricsApiToken = context.getParameter(DT_METRICS_API_TOKEN, "");
+                if (metricsApiToken == null || metricsApiToken.trim().isEmpty()) {
+                    metricsApiToken = context.getParameter(DT_API_TOKEN, "");
+                }
+                if (metricsApiToken == null || metricsApiToken.trim().isEmpty()) {
+                    logger.warn("Percentile metrics are enabled but no Metrics API token is configured.");
+                }
+
+                this.percentileMetricsExporter = new DynatracePercentileMetricsExporter(
+                        context.getParameter(DT_METRICS_URL),
+                        metricsApiToken,
+                        (int) this.timeoutMs,
+                        context.getLongParameter(DT_METRICS_FLUSH_INTERVAL_MS, DEFAULT_METRICS_FLUSH_INTERVAL_MS),
+                        context.getParameter(DT_METRICS_PERCENTILES),
+                        context.getParameter(DT_METRICS_DIMENSIONS));
+            }
+
             super.setupTest(context);
         } catch (Exception e) {
             throw new IllegalStateException("Unable to initialise the Dynatrace Backend Listener", e);
@@ -85,10 +120,22 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
     @Override
     public void handleSampleResults(List<SampleResult> results, BackendListenerContext context) {
         for (SampleResult sr : results) {
-            DynatraceMetric metric = new DynatraceMetric(sr, context.getParameter(DT_TEST_MODE),
+            if (this.percentileMetricsEnabled && matchesSampleFilter(sr)) {
+                try {
+                    this.percentileMetricsExporter.record(sr);
+                } catch (Exception e) {
+                    /* The independent Metrics API path must never block log ingestion. */
+                    logger.error("Unable to aggregate a sampler for percentile metric ingestion.", e);
+                }
+            }
+
+            DynatraceMetric metric = new DynatraceMetric(
+                    sr,
+                    context.getParameter(DT_TEST_MODE),
                     context.getParameter(DT_TIMESTAMP),
                     context.getBooleanParameter(DT_PARSE_REQ_HEADERS, false),
-                    context.getBooleanParameter(DT_PARSE_RES_HEADERS, false), fields,
+                    context.getBooleanParameter(DT_PARSE_RES_HEADERS, false),
+                    fields,
                     context.getParameter(DT_LOG_SOURCE));
 
             if (validateSample(context, sr)) {
@@ -115,49 +162,49 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
 
     @Override
     public void teardownTest(BackendListenerContext context) throws Exception {
-        if (this.sender.getListSize() > 0) {
-            this.sender.sendRequest();
+        try {
+            if (this.sender.getListSize() > 0) {
+                this.sender.sendRequest();
+            }
+            this.sender.close();
+        } finally {
+            if (this.percentileMetricsExporter != null) {
+                this.percentileMetricsExporter.close();
+            }
+            super.teardownTest(context);
         }
-        this.sender.close();
-        super.teardownTest(context);
     }
 
     /**
-     * Converts a semicolon-separated parameter value into a Set of trimmed, lower-cased strings.
+     * Converts a semicolon-separated parameter value into a Set of trimmed,
+     * lower-cased strings.
      *
-     * @param context   the BackendListenerContext
+     * @param context the BackendListenerContext
      * @param parameter the parameter name to read
-     * @param set       the Set to populate
+     * @param set the Set to populate
      */
     private void convertParameterToSet(BackendListenerContext context, String parameter, Set<String> set) {
-        String[] array = (context.getParameter(parameter).contains(";")) ? context.getParameter(parameter).split(";")
+        String[] array = (context.getParameter(parameter).contains(";"))
+                ? context.getParameter(parameter).split(";")
                 : new String[] { context.getParameter(parameter) };
         if (array.length > 0 && !array[0].trim().equals("")) {
             for (String entry : array) {
                 set.add(entry.toLowerCase().trim());
-                if (logger.isDebugEnabled())
+                if (logger.isDebugEnabled()) {
                     logger.debug("Parsed from " + parameter + ": " + entry.toLowerCase().trim());
+                }
             }
         }
     }
 
-    /**
-     * Validates whether the current sample should be forwarded to Dynatrace based on
-     * the configured sample filters and test mode.
-     *
-     * @param context the BackendListenerContext
-     * @param sr      the current SampleResult
-     * @return {@code true} if the sample should be sent
-     */
-    private boolean validateSample(BackendListenerContext context, SampleResult sr) {
+    /** Applies the existing sampler-label filter without applying dt.test.mode. */
+    private boolean matchesSampleFilter(SampleResult sr) {
         boolean valid = true;
         String sampleLabel = sr.getSampleLabel().toLowerCase().trim();
-
         if (this.filters.size() > 0) {
             for (String filter : filters) {
                 Pattern pattern = Pattern.compile(filter);
                 Matcher matcher = pattern.matcher(sampleLabel);
-
                 if (!sampleLabel.startsWith("!!") && (sampleLabel.contains(filter) || matcher.find())) {
                     valid = true;
                     break;
@@ -166,17 +213,30 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
                 }
             }
         }
+        return valid;
+    }
+
+    /**
+     * Validates whether the current sample should be forwarded to Dynatrace based
+     * on the configured sample filters and test mode.
+     *
+     * @param context the BackendListenerContext
+     * @param sr the current SampleResult
+     * @return {@code true} if the sample should be sent
+     */
+    private boolean validateSample(BackendListenerContext context, SampleResult sr) {
+        boolean valid = matchesSampleFilter(sr);
 
         // If the sample is successful but test mode is "error", drop it
         if (sr.isSuccessful() && context.getParameter(DT_TEST_MODE).trim().equalsIgnoreCase("error") && valid) {
             valid = false;
         }
-
         return valid;
     }
 
     /**
-     * Warns the user if the configured test mode is not one of the recognised values.
+     * Warns the user if the configured test mode is not one of the recognised
+     * values.
      *
      * @param mode the dt.test.mode parameter value
      */
@@ -184,14 +244,10 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
         if (!this.modes.contains(mode)) {
             logger.warn(
                     "The parameter \"dt.test.mode\" is not set to a recognised value. Valid modes are: debug, info, error, quiet.");
-            logger.warn(
-                    " -- \"debug\": sends request and response details for every sample.");
-            logger.warn(
-                    " -- \"info\": sends request and response details only for failed samples. Recommended for most environments.");
-            logger.warn(
-                    " -- \"error\": only forwards failed samples (successful samples are dropped).");
-            logger.warn(
-                    " -- \"quiet\": never sends request/response details.");
+            logger.warn(" -- \"debug\": sends request and response details for every sample.");
+            logger.warn(" -- \"info\": sends request and response details only for failed samples. Recommended for most environments.");
+            logger.warn(" -- \"error\": only forwards failed samples (successful samples are dropped).");
+            logger.warn(" -- \"quiet\": never sends request/response details.");
         }
     }
 }
