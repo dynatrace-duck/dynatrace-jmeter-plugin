@@ -13,6 +13,9 @@ import org.slf4j.LoggerFactory;
 
 import com.google.gson.Gson;
 
+import io.github.delirius325.jmeter.backendlistener.dynatrace.metrics.MintMetricsCollector;
+import io.github.delirius325.jmeter.backendlistener.dynatrace.metrics.MintMetricEnricher;
+
 public class DynatraceBackendClient extends AbstractBackendListenerClient {
 
     private static final String DT_URL = "dt.url";
@@ -26,6 +29,7 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
     private static final String DT_PARSE_REQ_HEADERS = "dt.parse.all.req.headers";
     private static final String DT_PARSE_RES_HEADERS = "dt.parse.all.res.headers";
     private static final String DT_LOG_SOURCE = "dt.log.source";
+    private static final String DT_MINT_ENABLED = "dt.mint.enabled";
     private static final long DEFAULT_TIMEOUT_MS = 10000L;
     private static final Logger logger = LoggerFactory.getLogger(DynatraceBackendClient.class);
     private static final Map<String, String> DEFAULT_ARGS = new LinkedHashMap<>();
@@ -42,6 +46,7 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
         DEFAULT_ARGS.put(DT_PARSE_REQ_HEADERS, "false");
         DEFAULT_ARGS.put(DT_PARSE_RES_HEADERS, "false");
         DEFAULT_ARGS.put(DT_LOG_SOURCE, "jmeter");
+        DEFAULT_ARGS.put(DT_MINT_ENABLED, "true");
     }
 
     private DynatraceMetricSender sender;
@@ -50,6 +55,9 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
     private Set<String> fields;
     private int bulkSize;
     private long timeoutMs;
+    private MintMetricsCollector mintCollector;
+    private MintMetricEnricher mintEnricher;
+    private boolean mintEnabled;
 
     @Override
     public Arguments getDefaultParameters() {
@@ -66,6 +74,7 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
             this.modes = new HashSet<>(Arrays.asList("info", "debug", "error", "quiet"));
             this.bulkSize = Integer.parseInt(context.getParameter(DT_BATCH_SIZE));
             this.timeoutMs = Long.parseLong(context.getParameter(DT_TIMEOUT_MS));
+            this.mintEnabled = context.getBooleanParameter(DT_MINT_ENABLED, true);
 
             convertParameterToSet(context, DT_SAMPLE_FILTER, this.filters);
             convertParameterToSet(context, DT_FIELDS, this.fields);
@@ -74,6 +83,13 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
                     context.getParameter(DT_URL),
                     context.getParameter(DT_API_TOKEN),
                     (int) this.timeoutMs);
+
+            // Initialize MINT metrics components if enabled
+            if (this.mintEnabled) {
+                this.mintCollector = new MintMetricsCollector();
+                this.mintEnricher = new MintMetricEnricher(this.mintCollector);
+                logger.info("MINT percentile metrics collection enabled");
+            }
 
             checkTestMode(context.getParameter(DT_TEST_MODE));
             super.setupTest(context);
@@ -90,6 +106,15 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
                     context.getBooleanParameter(DT_PARSE_REQ_HEADERS, false),
                     context.getBooleanParameter(DT_PARSE_RES_HEADERS, false), fields,
                     context.getParameter(DT_LOG_SOURCE));
+
+            // Set the MINT enricher if enabled
+            if (this.mintEnabled && this.mintEnricher != null) {
+                metric.setMintEnricher(this.mintEnricher);
+                // Record response times for this sample
+                String sampleLabel = sr.getSampleLabel();
+                this.mintCollector.recordTransactionResponseTime(sampleLabel, sr.getTime());
+                this.mintCollector.recordRequestResponseTime(sampleLabel, sr.getTime());
+            }
 
             if (validateSample(context, sr)) {
                 try {
@@ -118,8 +143,38 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
         if (this.sender.getListSize() > 0) {
             this.sender.sendRequest();
         }
+
+        // Log MINT metrics summary if enabled
+        if (this.mintEnabled && this.mintCollector != null) {
+            logMintMetricsSummary();
+        }
+
         this.sender.close();
         super.teardownTest(context);
+    }
+
+    /**
+     * Logs a summary of collected MINT metrics for debugging purposes.
+     */
+    private void logMintMetricsSummary() {
+        try {
+            int transactionCount = this.mintCollector.getTransactionCount();
+            int requestCount = this.mintCollector.getRequestCount();
+            logger.info("MINT metrics collection summary: {} transactions, {} requests",
+                    transactionCount, requestCount);
+            
+            if (logger.isDebugEnabled()) {
+                Map<String, PercentileCalculator.MintPercentiles> allTransactionPercentiles =
+                        this.mintCollector.getAllTransactionPercentiles();
+                for (Map.Entry<String, PercentileCalculator.MintPercentiles> entry : allTransactionPercentiles.entrySet()) {
+                    PercentileCalculator.MintPercentiles p = entry.getValue();
+                    logger.debug("Transaction '{}' - p50: {}, p90: {}, p95: {}, p99: {}",
+                            entry.getKey(), p.p50, p.p90, p.p95, p.p99);
+                }
+            }
+        } catch (Exception e) {
+            logger.warn("Failed to log MINT metrics summary", e);
+        }
     }
 
     /**
