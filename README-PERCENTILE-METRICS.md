@@ -1,6 +1,6 @@
 # Percentile metrics extension
 
-This overlay leaves the existing JSON log-ingestion path intact and adds an independent Dynatrace Metrics API exporter that reuses the main Dynatrace connection settings.
+This overlay leaves the existing JSON log-ingestion path intact and adds an always-on Dynatrace Metrics API exporter that reuses the main Dynatrace connection settings.
 
 ## New Backend Listener arguments
 
