@@ -31,13 +31,16 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
     private static final String DT_METRICS_PERCENTILES = "dt.metrics.percentiles";
     private static final String DT_METRICS_DIMENSIONS = "dt.metrics.dimensions";
 
+    private static final String LOG_INGEST_PATH = "/api/v2/logs/ingest";
+    private static final String METRICS_INGEST_PATH = "/api/v2/metrics/ingest";
+
     private static final long DEFAULT_TIMEOUT_MS = 10000L;
     private static final long DEFAULT_METRICS_FLUSH_INTERVAL_MS = 10000L;
     private static final Logger logger = LoggerFactory.getLogger(DynatraceBackendClient.class);
     private static final Map<String, String> DEFAULT_ARGS = new LinkedHashMap<>();
 
     static {
-        DEFAULT_ARGS.put(DT_URL, "https://<env-id>.live.dynatrace.com/api/v2/logs/ingest");
+        DEFAULT_ARGS.put(DT_URL, "https://<env-id>.live.dynatrace.com");
         DEFAULT_ARGS.put(DT_API_TOKEN, "");
         DEFAULT_ARGS.put(DT_TIMESTAMP, "yyyy-MM-dd'T'HH:mm:ss.SSSZZ");
         DEFAULT_ARGS.put(DT_BATCH_SIZE, "100");
@@ -49,7 +52,7 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
         DEFAULT_ARGS.put(DT_PARSE_RES_HEADERS, "false");
         DEFAULT_ARGS.put(DT_LOG_SOURCE, "jmeter");
 
-        DEFAULT_ARGS.put(DT_METRICS_URL, "https://<env-id>.live.dynatrace.com/api/v2/metrics/ingest");
+        DEFAULT_ARGS.put(DT_METRICS_URL, "https://<env-id>.live.dynatrace.com");
         DEFAULT_ARGS.put(DT_METRICS_FLUSH_INTERVAL_MS, Long.toString(DEFAULT_METRICS_FLUSH_INTERVAL_MS));
         DEFAULT_ARGS.put(DT_METRICS_PERCENTILES, "50;90;95;99");
         DEFAULT_ARGS.put(DT_METRICS_DIMENSIONS, "");
@@ -81,7 +84,7 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
             convertParameterToSet(context, DT_SAMPLE_FILTER, this.filters);
             convertParameterToSet(context, DT_FIELDS, this.fields);
             this.sender = new DynatraceMetricSender(
-                    context.getParameter(DT_URL),
+                    buildIngestUrl(context.getParameter(DT_URL), LOG_INGEST_PATH),
                     context.getParameter(DT_API_TOKEN),
                     (int) this.timeoutMs);
             checkTestMode(context.getParameter(DT_TEST_MODE));
@@ -92,7 +95,7 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
             }
 
             this.percentileMetricsExporter = new DynatracePercentileMetricsExporter(
-                    context.getParameter(DT_METRICS_URL),
+                    buildIngestUrl(context.getParameter(DT_METRICS_URL), METRICS_INGEST_PATH),
                     apiToken,
                     (int) this.timeoutMs,
                     context.getLongParameter(DT_METRICS_FLUSH_INTERVAL_MS, DEFAULT_METRICS_FLUSH_INTERVAL_MS),
@@ -161,6 +164,25 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
             }
             super.teardownTest(context);
         }
+    }
+
+    /**
+     * Builds the full ingest URL by appending the given path to the base URL,
+     * normalising any trailing slash on the base URL first.
+     *
+     * @param baseUrl the base Dynatrace environment URL (e.g. "https://abc.live.dynatrace.com")
+     * @param path    the ingest API path to append (e.g. "/api/v2/logs/ingest")
+     * @return the full ingest URL
+     */
+    private static String buildIngestUrl(String baseUrl, String path) {
+        if (baseUrl == null || baseUrl.trim().isEmpty()) {
+            throw new IllegalArgumentException("dt.url must not be blank");
+        }
+        String trimmed = baseUrl.trim();
+        if (trimmed.endsWith("/")) {
+            trimmed = trimmed.substring(0, trimmed.length() - 1);
+        }
+        return trimmed + path;
     }
 
     /**
