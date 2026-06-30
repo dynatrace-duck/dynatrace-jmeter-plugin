@@ -1,6 +1,7 @@
 package io.github.delirius325.jmeter.backendlistener.dynatrace;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -9,6 +10,7 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 
+import org.apache.jmeter.config.Arguments;
 import org.apache.jmeter.samplers.SampleResult;
 import org.junit.Before;
 import org.junit.Test;
@@ -221,5 +223,67 @@ public class TestDynatraceBackend {
         Map<String, Object> result = metric.getMetric(null);
 
         assertEquals("log.source should fall back to 'jmeter' when null", "jmeter", result.get("log.source"));
+    }
+
+    /**
+     * Verifies that the default parameters contain exactly one token parameter (dt.api.token)
+     * and do not expose the deprecated separate metrics token (dt.metrics.api.token).
+     */
+    @Test
+    public void testDefaultParametersContainSingleToken() {
+        DynatraceBackendClient client = new DynatraceBackendClient();
+        Arguments defaults = client.getDefaultParameters();
+
+        boolean hasApiToken = false;
+        boolean hasMetricsApiToken = false;
+        for (int i = 0; i < defaults.getArguments().size(); i++) {
+            String name = defaults.getArgument(i).getName();
+            if ("dt.api.token".equals(name)) {
+                hasApiToken = true;
+            }
+            if ("dt.metrics.api.token".equals(name)) {
+                hasMetricsApiToken = true;
+            }
+        }
+
+        assertTrue("dt.api.token must be present in default parameters", hasApiToken);
+        assertFalse("dt.metrics.api.token must not be present in default parameters", hasMetricsApiToken);
+    }
+
+    /**
+     * Verifies that the deprecated metric enable/disable toggle (dt.metrics.enabled)
+     * is not part of the default parameters.
+     */
+    @Test
+    public void testDefaultParametersDoNotExposeMetricsEnabledToggle() {
+        DynatraceBackendClient client = new DynatraceBackendClient();
+        Arguments defaults = client.getDefaultParameters();
+
+        for (int i = 0; i < defaults.getArguments().size(); i++) {
+            assertFalse(
+                    "dt.metrics.enabled must not be present in default parameters",
+                    "dt.metrics.enabled".equals(defaults.getArgument(i).getName()));
+        }
+    }
+
+    /**
+     * Verifies that the default parameters include the metrics URL, confirming that
+     * metric collection is always configured (always-on).
+     */
+    @Test
+    public void testDefaultParametersIncludeMetricsUrl() {
+        DynatraceBackendClient client = new DynatraceBackendClient();
+        Arguments defaults = client.getDefaultParameters();
+
+        boolean hasMetricsUrl = false;
+        for (int i = 0; i < defaults.getArguments().size(); i++) {
+            if ("dt.metrics.url".equals(defaults.getArgument(i).getName())) {
+                hasMetricsUrl = true;
+                break;
+            }
+        }
+
+        assertTrue("dt.metrics.url must be present in default parameters for always-on metric collection",
+                hasMetricsUrl);
     }
 }
