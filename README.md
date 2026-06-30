@@ -55,7 +55,7 @@ Both scopes must be granted on the same token. Separate tokens are not supported
 
 | Parameter | Default | Description |
 |---|---|---|
-| `dt.url` | `https://<env-id>.live.dynatrace.com/api/v2/logs/ingest` | Full Dynatrace Log Ingest v2 endpoint URL |
+| `dt.url` | `https://<env-id>.live.dynatrace.com` | Base Dynatrace environment URL; the `/api/v2/logs/ingest` path is appended automatically |
 | `dt.api.token` | *(empty)* | Dynatrace API token with `logs.ingest` **and** `metrics.ingest` scopes |
 | `dt.timestamp` | `yyyy-MM-dd'T'HH:mm:ss.SSSZZ` | Format for `SampleStartTime` / `SampleEndTime` attributes |
 | `dt.batch.size` | `100` | Number of samples to accumulate before sending a batch |
@@ -70,7 +70,7 @@ Both scopes must be granted on the same token. Separate tokens are not supported
 
 | Parameter | Default | Description |
 |---|---|---|
-| `dt.metrics.url` | `https://<env-id>.live.dynatrace.com/api/v2/metrics/ingest` | Full Dynatrace Metrics API v2 endpoint URL |
+| `dt.metrics.url` | `https://<env-id>.live.dynatrace.com` | Base Dynatrace environment URL; the `/api/v2/metrics/ingest` path is appended automatically |
 | `dt.metrics.flush.interval.ms` | `10000` | How often (ms) to push accumulated percentile gauges |
 | `dt.metrics.percentiles` | `50;90;95;99` | Semicolon-separated list of percentiles to compute and export |
 | `dt.metrics.dimensions` | *(empty)* | Semicolon-separated `key=value` pairs added as static dimensions to every metric line |
