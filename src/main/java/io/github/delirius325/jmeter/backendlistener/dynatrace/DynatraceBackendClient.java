@@ -176,7 +176,7 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
      */
     private static String buildIngestUrl(String baseUrl, String path) {
         if (baseUrl == null || baseUrl.trim().isEmpty()) {
-            throw new IllegalArgumentException("dt.url must not be blank");
+            throw new IllegalArgumentException("Base Dynatrace environment URL must not be blank");
         }
         String trimmed = baseUrl.trim();
         if (trimmed.endsWith("/")) {
