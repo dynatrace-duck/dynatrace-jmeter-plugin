@@ -267,23 +267,18 @@ public class TestDynatraceBackend {
     }
 
     /**
-     * Verifies that the default parameters include the metrics URL, confirming that
-     * metric collection is always configured (always-on).
+     * Verifies that the dedicated metrics URL parameter has been removed and that
+     * metrics reuse dt.url for always-on metric collection.
      */
     @Test
-    public void testDefaultParametersIncludeMetricsUrl() {
+    public void testDefaultParametersDoNotExposeMetricsUrl() {
         DynatraceBackendClient client = new DynatraceBackendClient();
         Arguments defaults = client.getDefaultParameters();
 
-        boolean hasMetricsUrl = false;
         for (int i = 0; i < defaults.getArguments().size(); i++) {
-            if ("dt.metrics.url".equals(defaults.getArgument(i).getName())) {
-                hasMetricsUrl = true;
-                break;
-            }
+            assertFalse(
+                    "dt.metrics.url must not be present in default parameters",
+                    "dt.metrics.url".equals(defaults.getArgument(i).getName()));
         }
-
-        assertTrue("dt.metrics.url must be present in default parameters for always-on metric collection",
-                hasMetricsUrl);
     }
 }

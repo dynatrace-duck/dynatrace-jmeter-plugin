@@ -70,12 +70,11 @@ Both scopes must be granted on the same token. Separate tokens are not supported
 
 | Parameter | Default | Description |
 |---|---|---|
-| `dt.metrics.url` | `https://<env-id>.live.dynatrace.com` | Base Dynatrace environment URL; the `/api/v2/metrics/ingest` path is appended automatically |
 | `dt.metrics.flush.interval.ms` | `10000` | How often (ms) to push accumulated percentile gauges |
 | `dt.metrics.percentiles` | `50;90;95;99` | Semicolon-separated list of percentiles to compute and export |
 | `dt.metrics.dimensions` | *(empty)* | Semicolon-separated `key=value` pairs added as static dimensions to every metric line |
 
-The same `dt.api.token` value is used for both the Log Ingest and Metrics Ingest paths.
+The same `dt.url` base URL and `dt.api.token` value are used for both the Log Ingest and Metrics Ingest paths.
 
 Every log event sent to Dynatrace always contains a `timestamp` (ISO 8601 sample time) and a `content` (the sample label) field in addition to the fields listed above.
 
@@ -102,4 +101,3 @@ Execute the command below. Make sure `JAVA_HOME` is set properly.
 mvn package
 ```
 Move the resulting JAR to your `JMETER_HOME/lib/ext`.
-

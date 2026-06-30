@@ -26,7 +26,6 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
     private static final String DT_PARSE_RES_HEADERS = "dt.parse.all.res.headers";
     private static final String DT_LOG_SOURCE = "dt.log.source";
 
-    private static final String DT_METRICS_URL = "dt.metrics.url";
     private static final String DT_METRICS_FLUSH_INTERVAL_MS = "dt.metrics.flush.interval.ms";
     private static final String DT_METRICS_PERCENTILES = "dt.metrics.percentiles";
     private static final String DT_METRICS_DIMENSIONS = "dt.metrics.dimensions";
@@ -52,7 +51,6 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
         DEFAULT_ARGS.put(DT_PARSE_RES_HEADERS, "false");
         DEFAULT_ARGS.put(DT_LOG_SOURCE, "jmeter");
 
-        DEFAULT_ARGS.put(DT_METRICS_URL, "https://<env-id>.live.dynatrace.com");
         DEFAULT_ARGS.put(DT_METRICS_FLUSH_INTERVAL_MS, Long.toString(DEFAULT_METRICS_FLUSH_INTERVAL_MS));
         DEFAULT_ARGS.put(DT_METRICS_PERCENTILES, "50;90;95;99");
         DEFAULT_ARGS.put(DT_METRICS_DIMENSIONS, "");
@@ -95,7 +93,7 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
             }
 
             this.percentileMetricsExporter = new DynatracePercentileMetricsExporter(
-                    buildIngestUrl(context.getParameter(DT_METRICS_URL), METRICS_INGEST_PATH),
+                    buildIngestUrl(context.getParameter(DT_URL), METRICS_INGEST_PATH),
                     apiToken,
                     (int) this.timeoutMs,
                     context.getLongParameter(DT_METRICS_FLUSH_INTERVAL_MS, DEFAULT_METRICS_FLUSH_INTERVAL_MS),
