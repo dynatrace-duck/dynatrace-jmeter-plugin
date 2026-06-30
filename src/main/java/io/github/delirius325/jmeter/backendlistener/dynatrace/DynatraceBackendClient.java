@@ -26,9 +26,7 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
     private static final String DT_PARSE_RES_HEADERS = "dt.parse.all.res.headers";
     private static final String DT_LOG_SOURCE = "dt.log.source";
 
-    private static final String DT_METRICS_ENABLED = "dt.metrics.enabled";
     private static final String DT_METRICS_URL = "dt.metrics.url";
-    private static final String DT_METRICS_API_TOKEN = "dt.metrics.api.token";
     private static final String DT_METRICS_FLUSH_INTERVAL_MS = "dt.metrics.flush.interval.ms";
     private static final String DT_METRICS_PERCENTILES = "dt.metrics.percentiles";
     private static final String DT_METRICS_DIMENSIONS = "dt.metrics.dimensions";
@@ -51,10 +49,7 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
         DEFAULT_ARGS.put(DT_PARSE_RES_HEADERS, "false");
         DEFAULT_ARGS.put(DT_LOG_SOURCE, "jmeter");
 
-        /* Opt-in: disabled means no percentile computation and no Metrics API calls. */
-        DEFAULT_ARGS.put(DT_METRICS_ENABLED, "false");
         DEFAULT_ARGS.put(DT_METRICS_URL, "https://<env-id>.live.dynatrace.com/api/v2/metrics/ingest");
-        DEFAULT_ARGS.put(DT_METRICS_API_TOKEN, "");
         DEFAULT_ARGS.put(DT_METRICS_FLUSH_INTERVAL_MS, Long.toString(DEFAULT_METRICS_FLUSH_INTERVAL_MS));
         DEFAULT_ARGS.put(DT_METRICS_PERCENTILES, "50;90;95;99");
         DEFAULT_ARGS.put(DT_METRICS_DIMENSIONS, "");
@@ -62,7 +57,6 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
 
     private DynatraceMetricSender sender;
     private DynatracePercentileMetricsExporter percentileMetricsExporter;
-    private boolean percentileMetricsEnabled;
     private Set<String> modes;
     private Set<String> filters;
     private Set<String> fields;
@@ -92,24 +86,18 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
                     (int) this.timeoutMs);
             checkTestMode(context.getParameter(DT_TEST_MODE));
 
-            this.percentileMetricsEnabled = context.getBooleanParameter(DT_METRICS_ENABLED, false);
-            if (this.percentileMetricsEnabled) {
-                String metricsApiToken = context.getParameter(DT_METRICS_API_TOKEN, "");
-                if (metricsApiToken == null || metricsApiToken.trim().isEmpty()) {
-                    metricsApiToken = context.getParameter(DT_API_TOKEN, "");
-                }
-                if (metricsApiToken == null || metricsApiToken.trim().isEmpty()) {
-                    logger.warn("Percentile metrics are enabled but no Metrics API token is configured.");
-                }
-
-                this.percentileMetricsExporter = new DynatracePercentileMetricsExporter(
-                        context.getParameter(DT_METRICS_URL),
-                        metricsApiToken,
-                        (int) this.timeoutMs,
-                        context.getLongParameter(DT_METRICS_FLUSH_INTERVAL_MS, DEFAULT_METRICS_FLUSH_INTERVAL_MS),
-                        context.getParameter(DT_METRICS_PERCENTILES),
-                        context.getParameter(DT_METRICS_DIMENSIONS));
+            String apiToken = context.getParameter(DT_API_TOKEN, "");
+            if (apiToken == null || apiToken.trim().isEmpty()) {
+                logger.warn("No API token is configured. Both log and metric ingestion will fail.");
             }
+
+            this.percentileMetricsExporter = new DynatracePercentileMetricsExporter(
+                    context.getParameter(DT_METRICS_URL),
+                    apiToken,
+                    (int) this.timeoutMs,
+                    context.getLongParameter(DT_METRICS_FLUSH_INTERVAL_MS, DEFAULT_METRICS_FLUSH_INTERVAL_MS),
+                    context.getParameter(DT_METRICS_PERCENTILES),
+                    context.getParameter(DT_METRICS_DIMENSIONS));
 
             super.setupTest(context);
         } catch (Exception e) {
@@ -120,7 +108,7 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
     @Override
     public void handleSampleResults(List<SampleResult> results, BackendListenerContext context) {
         for (SampleResult sr : results) {
-            if (this.percentileMetricsEnabled && matchesSampleFilter(sr)) {
+            if (matchesSampleFilter(sr)) {
                 try {
                     this.percentileMetricsExporter.record(sr);
                 } catch (Exception e) {
