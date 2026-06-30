@@ -36,7 +36,7 @@ Both paths are **always active** — metric collection is not user-configurable 
   * __debug__ – sends request/response details (headers, body) for every sample
   * __info__ – sends all samples, but includes request/response details only for failed samples *(recommended for most environments)*
   * __error__ – only forwards failed samples (along with their request/response details)
-  * __quiet__ – sends metrics only; never includes request/response details
+  * __quiet__ – still sends logs, but never includes request/response details
 
 ### API Token
 
@@ -75,6 +75,14 @@ Both scopes must be granted on the same token. Separate tokens are not supported
 | `dt.metrics.dimensions` | *(empty)* | Semicolon-separated `key=value` pairs added as static dimensions to every metric line |
 
 The same `dt.url` base URL and `dt.api.token` value are used for both the Log Ingest and Metrics Ingest paths.
+
+Example metric line:
+
+```text
+jmeter.mint.p95,transaction="HTTP Request - Submit order",injector_hostname="loadgen-01",environment="staging" gauge,218.5 1710000000000
+```
+
+The metric keys are fixed as `jmeter.mint.p<percentile>`, such as `jmeter.mint.p90` and `jmeter.mint.p95`. The exporter groups samples by JMeter sample label, including Transaction Controller parent samples when JMeter passes them to the Backend Listener, and uses JMeter's `SamplerMetric#getAllPercentile` aggregation with `resetForTimeInterval`.
 
 Every log event sent to Dynatrace always contains a `timestamp` (ISO 8601 sample time) and a `content` (the sample label) field in addition to the fields listed above.
 
