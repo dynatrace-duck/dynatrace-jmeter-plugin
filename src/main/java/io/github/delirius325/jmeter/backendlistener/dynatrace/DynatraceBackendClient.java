@@ -86,9 +86,14 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
                     (int) this.timeoutMs);
             checkTestMode(context.getParameter(DT_TEST_MODE));
 
+            String apiToken = context.getParameter(DT_API_TOKEN, "");
+            if (apiToken == null || apiToken.trim().isEmpty()) {
+                logger.warn("No API token is configured. Both log and metric ingestion will fail.");
+            }
+
             this.percentileMetricsExporter = new DynatracePercentileMetricsExporter(
                     context.getParameter(DT_METRICS_URL),
-                    context.getParameter(DT_API_TOKEN),
+                    apiToken,
                     (int) this.timeoutMs,
                     context.getLongParameter(DT_METRICS_FLUSH_INTERVAL_MS, DEFAULT_METRICS_FLUSH_INTERVAL_MS),
                     context.getParameter(DT_METRICS_PERCENTILES),
@@ -151,7 +156,9 @@ public class DynatraceBackendClient extends AbstractBackendListenerClient {
             }
             this.sender.close();
         } finally {
-            this.percentileMetricsExporter.close();
+            if (this.percentileMetricsExporter != null) {
+                this.percentileMetricsExporter.close();
+            }
             super.teardownTest(context);
         }
     }
