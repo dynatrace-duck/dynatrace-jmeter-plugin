@@ -36,7 +36,7 @@ Both paths are **always active** — metric collection is not user-configurable 
   * __debug__ – sends request/response details (headers, body) for every sample
   * __info__ – sends all samples, but includes request/response details only for failed samples *(recommended for most environments)*
   * __error__ – only forwards failed samples (along with their request/response details)
-  * __quiet__ – still sends logs, but never includes request/response details
+  * __quiet__ – sends all samples without request/response details
 
 ### API Token
 
@@ -76,7 +76,7 @@ Both scopes must be granted on the same token. Separate tokens are not supported
 
 The same `dt.url` base URL and `dt.api.token` value are used for both the Log Ingest and Metrics Ingest paths.
 
-Example metric line:
+Example metric line emitted by the plugin:
 
 ```text
 jmeter.mint.p95,transaction="HTTP Request - Submit order",injector_hostname="loadgen-01",environment="staging" gauge,218.5 1710000000000
