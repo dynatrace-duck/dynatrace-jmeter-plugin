@@ -8,7 +8,7 @@ import java.util.regex.Pattern;
 
 /** Builds Dynatrace Metrics API line-protocol records for percentile gauges. */
 final class DynatraceMetricLineBuilder {
-    private static final Pattern DIMENSION_KEY_PATTERN = Pattern.compile("[A-Za-z0-9_.:-]+");
+    private static final Pattern DIMENSION_KEY_PATTERN = Pattern.compile("[a-z0-9_.:-]+");
 
     private static final String METRIC_PREFIX = "jmeter.mint";
     private static final String TRANSACTION_DIMENSION = "samplelabel";
@@ -102,7 +102,7 @@ final class DynatraceMetricLineBuilder {
     private static void validateDimensionKey(String key) {
       if (key == null || !DIMENSION_KEY_PATTERN.matcher(key).matches()) {
         throw new IllegalArgumentException(
-          "Invalid Dynatrace dimension key: " + key + " (allowed: [A-Za-z0-9_.:-]+)"
+          "Invalid Dynatrace dimension key: " + key + " (allowed: [a-z0-9_.:-]+)"
         );
       }
     }
